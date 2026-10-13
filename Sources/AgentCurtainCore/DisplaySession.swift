@@ -302,10 +302,11 @@ public enum DisplaySessionOperations {
     /// Main display and all origins share one WindowServer transaction. Per-screen
     /// placement writes otherwise trigger several screen-change waves and app reflows.
     private static func restoreLayoutInOneTransaction(_ backup: DisplaySessionBackup, client: BetterDisplayClient) throws {
-        let active = try client.activeDisplays()
-        let ids = Dictionary(uniqueKeysWithValues: active.compactMap { identity in
-            identity.uuid.map { ($0, CGDirectDisplayID(identity.displayID)) }
-        })
+        let expectedUUIDs = Set(backup.displays.map(\.uuid))
+        // WindowServer display IDs settle before BetterDisplay's UUID metadata.
+        // Transitional UNKNOWN entries are not identities and must never key a map.
+        let active = try client.waitForActiveDisplays(uuids: expectedUUIDs, exact: false)
+        let ids = try layoutDisplayIDs(active, expectedUUIDs: expectedUUIDs)
         let changes = try backup.displays.map { saved -> (CGDirectDisplayID, Int32, Int32) in
             guard let id = ids[saved.uuid], let origin = placementOrigin(saved.placement) else {
                 throw BetterDisplayError.invalidValue("placement \(saved.uuid): \(saved.placement)")
@@ -343,6 +344,19 @@ public enum DisplaySessionOperations {
         if let main = backup.displays.first(where: \.wasMain) {
             try client.waitForMainDisplay(uuid: main.uuid)
         }
+    }
+
+    static func layoutDisplayIDs(_ active: [DisplayIdentity], expectedUUIDs: Set<String>) throws -> [String: CGDirectDisplayID] {
+        var ids: [String: CGDirectDisplayID] = [:]
+        for identity in active {
+            guard let uuid = identity.uuid, expectedUUIDs.contains(uuid) else { continue }
+            guard identity.displayID > 0, let id = CGDirectDisplayID(exactly: identity.displayID),
+                  ids.updateValue(id, forKey: uuid) == nil else {
+                throw BetterDisplayError.invalidDisplayList
+            }
+        }
+        guard expectedUUIDs.isSubset(of: Set(ids.keys)) else { throw BetterDisplayError.invalidDisplayList }
+        return ids
     }
 
     static func placementOrigin(_ value: String) -> (Int32, Int32)? {

@@ -4,6 +4,23 @@ import Testing
 @testable import AgentCurtainCore
 
 @Suite(.serialized) struct DisplaySessionTests {
+    @Test func layoutIgnoresDuplicateTransientUnknownUUIDsAndRejectsAmbiguousSavedIdentities() throws {
+        let active = [
+            DisplayIdentity(displayID: 1, uuid: "internal", isBuiltin: true),
+            DisplayIdentity(displayID: 2, uuid: "UNKNOWN", isBuiltin: false),
+            DisplayIdentity(displayID: 3, uuid: "UNKNOWN", isBuiltin: false),
+            DisplayIdentity(displayID: 4, uuid: "external", isBuiltin: false),
+        ]
+        let expected: Set<String> = ["internal", "external"]
+        #expect(try DisplaySessionOperations.layoutDisplayIDs(active, expectedUUIDs: expected) == ["internal": 1, "external": 4])
+        #expect(throws: BetterDisplayError.self) {
+            try DisplaySessionOperations.layoutDisplayIDs(active + [active[0]], expectedUUIDs: expected)
+        }
+        #expect(throws: BetterDisplayError.self) {
+            try DisplaySessionOperations.layoutDisplayIDs(Array(active.dropLast()), expectedUUIDs: expected)
+        }
+    }
+
     @Test func portraitReconnectWaitsForModeRefreshWithoutWritingTransientResolution() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
