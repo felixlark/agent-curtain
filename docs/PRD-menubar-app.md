@@ -1,7 +1,8 @@
 # PRD:AgentCurtain 菜单栏应用
 
 **目标读者:** 实现者(Codex)
-**状态:** 待实现
+**状态:** 已实现至 v1.1.3；实机验收推进中，见
+[当前验收矩阵](ACCEPTANCE-menubar-app.md)与[下一里程碑](PLAN-post-v1.1.3.md)。
 **前置:** 本仓库现有的 zsh + ad-hoc Swift 原型已验证核心机制可行,见
 [FINDINGS.md](FINDINGS.md)。本 PRD 是把原型重构为正式 app。
 
