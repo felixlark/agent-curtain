@@ -50,6 +50,8 @@ final class Scenario {
     // The following observations are accessed only by main-thread fake UI/input APIs.
     var presentations: [BannerController.Presentation] = []
     var starts = 0
+    var marker: Int64?
+    var paths: CurtainPaths!
     var stops = 0
     var reconciliations = 0
     var screenChange: (() -> Void)?
@@ -59,9 +61,10 @@ final class InputBlocker {
     let scenario = Scenario.current!
     var onReleaseHotkey: (() -> Void)?
     static func isAccessibilityTrusted(prompt: Bool) -> Bool { true }
-    func start(configuration: CurtainConfiguration, allowAnyInjected: Bool) throws {
+    func start(configuration: CurtainConfiguration, injectionMarker: Int64?) throws {
         precondition(Thread.isMainThread)
         scenario.starts += 1
+        scenario.marker = injectionMarker
         if scenario.blockerFails { throw FixtureFailure(message: "fixture blocker start failed") }
     }
     func stop() { precondition(Thread.isMainThread); scenario.stops += 1 }
@@ -70,7 +73,7 @@ final class InputBlocker {
 }
 
 final class BannerController {
-    enum Presentation: Equatable { case enabling, protected, disabling, released, failed }
+    enum Presentation: Equatable { case enabling, protected, markerProtected, disabling, released, failed }
     let scenario = Scenario.current!
     var onScreensChanged: (() -> Void)? {
         didSet { scenario.screenChange = onScreensChanged }
@@ -159,7 +162,9 @@ func runScenario(_ name: String, blockerFails: Bool = false, restoreFails: Bool 
         scenario.restore.release.signal()
         try? FileManager.default.removeItem(at: temporaryHome)
     }
-    let coordinator = CurtainCoordinator(paths: CurtainPaths(home: temporaryHome))
+    let paths = CurtainPaths(home: temporaryHome)
+    scenario.paths = paths
+    let coordinator = CurtainCoordinator(paths: paths)
     var prepared = false
     coordinator.prepare { prepared = true }
     try pump(until: { prepared }, "prepare \(name)")
@@ -175,7 +180,9 @@ func startupRecoveryContinuesAfterDisplayFailure() throws {
     let temporaryHome = FileManager.default.temporaryDirectory
         .appendingPathComponent("curtain-startup-home-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: temporaryHome) }
-    let coordinator = CurtainCoordinator(paths: CurtainPaths(home: temporaryHome))
+    let paths = CurtainPaths(home: temporaryHome)
+    scenario.paths = paths
+    let coordinator = CurtainCoordinator(paths: paths)
     var prepared = false
     coordinator.prepare { prepared = true }
     try pump(until: { prepared }, "startup display failure")
@@ -194,7 +201,9 @@ func startupRecoveryContinuesAfterBrightnessFailure() throws {
     let temporaryHome = FileManager.default.temporaryDirectory
         .appendingPathComponent("curtain-startup-home-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: temporaryHome) }
-    let coordinator = CurtainCoordinator(paths: CurtainPaths(home: temporaryHome))
+    let paths = CurtainPaths(home: temporaryHome)
+    scenario.paths = paths
+    let coordinator = CurtainCoordinator(paths: paths)
     var prepared = false
     coordinator.prepare { prepared = true }
     try pump(until: { prepared }, "startup brightness failure")
@@ -336,8 +345,52 @@ func windowFailureDoesNotLeaveStaleDisplayCountOrBlockNextDraw() throws {
     }
 }
 
+
+func markerTransitions() throws {
+    try runScenario("marker transitions") { coordinator, scenario in
+        let marker = Int64.min + 123
+        var drawn: ControlResponse?
+        coordinator.handle(.draw(duration: nil, injectionMarker: marker)) { drawn = $0 }
+        try scenario.dim.awaitEntry("marker draw")
+        scenario.dim.release.signal()
+        try pump(until: { drawn != nil }, "marker drawn")
+        try require(drawn?.ok == true && coordinator.phase == .drawn, "marker draw finishes drawn")
+        try require(drawn?.injectionMarker == marker && scenario.marker == marker, "response and blocker use same marker")
+        try require(coordinator.statusSummary.contains("屏幕关闭·仅放行注入") && scenario.presentations.last == .markerProtected, "menu and banner marker wording")
+        let file = scenario.paths.injectionMarker
+        let text = try String(contentsOf: file, encoding: .utf8)
+        try require(Int64(text.trimmingCharacters(in: .whitespacesAndNewlines)) == marker, "marker persisted exactly")
+        let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
+        try require((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o600, "marker mode is 0600")
+        try require(FileManager.default.fileExists(atPath: scenario.paths.expectation.path), "expectation remains recorded")
+        var repeated: ControlResponse?
+        coordinator.draw(injectionMarker: 77) { repeated = $0 }
+        try require(repeated?.injectionMarker == marker, "repeated on preserves current session")
+        var opened: ControlResponse?
+        coordinator.open { opened = $0 }
+        try require(coordinator.injectionMarker == nil && !FileManager.default.fileExists(atPath: file.path), "open revokes marker immediately")
+        try require(!FileManager.default.fileExists(atPath: scenario.paths.expectation.path), "open clears expectation")
+        try scenario.restore.awaitEntry("marker open")
+        scenario.restore.release.signal()
+        try pump(until: { opened != nil }, "marker open complete")
+        try require(opened?.ok == true && opened?.injectionMarker == nil, "open response has no marker")
+    }
+    try runScenario("marker rollback", blockerFails: true) { coordinator, scenario in
+        var drawn: ControlResponse?
+        coordinator.draw(injectionMarker: 77) { drawn = $0 }
+        try scenario.dim.awaitEntry("marker rollback draw")
+        scenario.dim.release.signal()
+        try scenario.restore.awaitEntry("marker rollback restore")
+        try require(coordinator.injectionMarker == nil && !FileManager.default.fileExists(atPath: scenario.paths.injectionMarker.path), "failed draw revokes marker")
+        scenario.restore.release.signal()
+        try pump(until: { drawn != nil }, "marker rollback complete")
+        try require(drawn?.ok == false, "failed blocker must fail marker draw")
+    }
+}
+
 precondition(Thread.isMainThread)
 let cases: [(String, () throws -> Void)] = [
+    ("marker draw/open, secure file, rollback and wording", markerTransitions),
     ("window error preserves actual display count and allows next draw", windowFailureDoesNotLeaveStaleDisplayCountOrBlockNextDraw),
     ("startup display failure still restores brightness", startupRecoveryContinuesAfterDisplayFailure),
     ("startup brightness failure still restores windows", startupRecoveryContinuesAfterBrightnessFailure),

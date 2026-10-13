@@ -6,11 +6,13 @@ public enum InputDecision {
         pid: Int32,
         allowedPIDs: Set<Int32>,
         deniedPIDs: Set<Int32>,
-        allowAnyInjected: Bool
+        injectionMarker: Int64? = nil,
+        eventMarker: Int64 = 0
     ) -> Bool {
         guard pid != 0 else { return false }
         if deniedPIDs.contains(pid) { return false }
-        return allowAnyInjected || allowedPIDs.contains(pid)
+        if let injectionMarker, injectionMarker != 0, eventMarker == injectionMarker { return true }
+        return allowedPIDs.contains(pid)
     }
 }
 

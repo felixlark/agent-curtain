@@ -3,22 +3,75 @@ import Testing
 @testable import AgentCurtainCore
 
 @Test func controlProtocolParsesCompatibleCommands() throws {
-    #expect(try ControlCommand.parse("on") == .draw(duration: nil, allowAnyInjected: false))
-    #expect(try ControlCommand.parse("on 60 --allow-any-injected") == .draw(duration: 60, allowAnyInjected: true))
+    #expect(try ControlCommand.parse("on") == .draw(duration: nil, injectionMarker: nil))
+    #expect(try ControlCommand.parse("on 60") == .draw(duration: 60, injectionMarker: nil))
     #expect(try ControlCommand.parse("off") == .open)
     #expect(try ControlCommand.parse("status") == .status)
     #expect(try ControlCommand.parse("quit") == .quit)
-    #expect(throws: ControlProtocolError.self) { try ControlCommand.parse("on -1") }
-    #expect(throws: ControlProtocolError.self) { try ControlCommand.parse("off now") }
+}
+
+@Test func markerOptionCombinations() throws {
+    for (line, expectedDuration) in [("on --allow-marker", nil as Double?), ("on 30 --allow-marker", 30), ("on --allow-marker 30", 30), (" on   --allow-marker 0.5 ", 0.5)] {
+        guard case let .draw(duration, marker) = try ControlCommand.parse(line) else {
+            Issue.record("expected draw"); continue
+        }
+        #expect(duration == expectedDuration)
+        #expect(marker != nil && marker != 0)
+    }
+}
+
+@Test func markerOptionRejectsInvalidArguments() {
+    for line in ["on --allow-marker --allow-marker", "on --allow-marker 30 40", "on 0", "on -1", "on inf", "on nan", "on --allow-marker bad", "on --allow-marker=123", "on --allow-any-injected", "on --allow-marker --allow-any-injected", "off --allow-marker", "status --allow-marker", "on --unknown"] {
+        #expect(throws: ControlProtocolError.self) { try ControlCommand.parse(line) }
+    }
 }
 
 @Test func denyAlwaysWinsAndPhysicalInputIsAlwaysBlocked() {
     let allowed: Set<Int32> = [42, 43]
     let denied: Set<Int32> = [43, 44]
-    #expect(!InputDecision.shouldAllow(pid: 0, allowedPIDs: allowed, deniedPIDs: denied, allowAnyInjected: true))
-    #expect(InputDecision.shouldAllow(pid: 42, allowedPIDs: allowed, deniedPIDs: denied, allowAnyInjected: false))
-    #expect(!InputDecision.shouldAllow(pid: 43, allowedPIDs: allowed, deniedPIDs: denied, allowAnyInjected: true))
-    #expect(InputDecision.shouldAllow(pid: 45, allowedPIDs: allowed, deniedPIDs: denied, allowAnyInjected: true))
+    #expect(!InputDecision.shouldAllow(pid: 0, allowedPIDs: allowed, deniedPIDs: denied))
+    #expect(InputDecision.shouldAllow(pid: 42, allowedPIDs: allowed, deniedPIDs: denied))
+    #expect(!InputDecision.shouldAllow(pid: 43, allowedPIDs: allowed, deniedPIDs: denied))
+    #expect(!InputDecision.shouldAllow(pid: 45, allowedPIDs: allowed, deniedPIDs: denied))
+}
+
+@Test func injectionMarkerIsExactAndNeverOverridesDenylist() {
+    let marker = Int64.min + 17
+    let allowed: Set<Int32> = [42, 43]
+    let denied: Set<Int32> = [43, 44]
+    #expect(InputDecision.shouldAllow(pid: 45, allowedPIDs: allowed, deniedPIDs: denied, injectionMarker: marker, eventMarker: marker))
+    #expect(!InputDecision.shouldAllow(pid: 45, allowedPIDs: allowed, deniedPIDs: denied, injectionMarker: marker, eventMarker: marker + 1))
+    #expect(!InputDecision.shouldAllow(pid: 45, allowedPIDs: allowed, deniedPIDs: denied, injectionMarker: marker))
+    #expect(!InputDecision.shouldAllow(pid: 43, allowedPIDs: allowed, deniedPIDs: denied, injectionMarker: marker, eventMarker: marker))
+    #expect(!InputDecision.shouldAllow(pid: 45, allowedPIDs: allowed, deniedPIDs: denied, eventMarker: marker))
+    #expect(InputDecision.shouldAllow(pid: 42, allowedPIDs: allowed, deniedPIDs: denied, eventMarker: marker))
+    #expect(!InputDecision.shouldAllow(pid: 0, allowedPIDs: allowed, deniedPIDs: denied, injectionMarker: marker, eventMarker: marker))
+    #expect(!InputDecision.shouldAllow(pid: 45, allowedPIDs: allowed, deniedPIDs: denied, injectionMarker: 0))
+}
+
+@Test func markerResponseRoundTripsAll64Bits() throws {
+    for marker in [Int64.min, Int64.max, Int64(-17)] {
+        let response = ControlResponse(ok: true, state: "drawn", injectionMarker: marker)
+        #expect(try JSONDecoder().decode(ControlResponse.self, from: response.jsonLine()) == response)
+    }
+    let legacy = Data(#"{"ok":true,"state":"open"}"#.utf8)
+    #expect(try JSONDecoder().decode(ControlResponse.self, from: legacy).injectionMarker == nil)
+}
+
+@Test func markerStoreWritesSecureFileAndClearsIdempotently() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let paths = CurtainPaths(home: root)
+    try paths.prepareDirectories()
+    try InjectionMarkerStore.write(Int64.min, to: paths.injectionMarker)
+    #expect(try String(contentsOf: paths.injectionMarker, encoding: .utf8) == "\(Int64.min)\n")
+    let attrs = try FileManager.default.attributesOfItem(atPath: paths.injectionMarker.path)
+    #expect((attrs[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+    try InjectionMarkerStore.write(Int64.max, to: paths.injectionMarker)
+    #expect(try String(contentsOf: paths.injectionMarker, encoding: .utf8) == "\(Int64.max)\n")
+    try InjectionMarkerStore.clear(at: paths.injectionMarker)
+    #expect(!FileManager.default.fileExists(atPath: paths.injectionMarker.path))
+    try InjectionMarkerStore.clear(at: paths.injectionMarker)
 }
 
 @Test func processNamesMatchExactlyRatherThanBySubstring() {

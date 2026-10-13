@@ -10,7 +10,7 @@ denylist=$config_dir/denylist
 installed_app=/Applications/AgentCurtain.app
 
 usage() {
-  print -u2 'usage: curtain {on [seconds] [--allow-any-injected]|off|status|doctor|allow|deny}'
+  print -u2 'usage: curtain {on [seconds] [--allow-marker]|off|status|doctor|allow|deny}'
 }
 
 prepare_config() {

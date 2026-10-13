@@ -11,7 +11,7 @@ final class InputBlocker {
     private var deniedRules: [String] = []
     private var allowedPIDs = Set<Int32>()
     private var deniedPIDs = Set<Int32>()
-    private var allowAnyInjected = false
+    private var injectionMarker: Int64?
     private var blockedCount: UInt64 = 0
     private var allowedCount: UInt64 = 0
 
@@ -23,10 +23,10 @@ final class InputBlocker {
         return AXIsProcessTrustedWithOptions(options)
     }
 
-    func start(configuration: CurtainConfiguration, allowAnyInjected: Bool) throws {
+    func start(configuration: CurtainConfiguration, injectionMarker: Int64?) throws {
         precondition(Thread.isMainThread)
         guard tap == nil else { return }
-        self.allowAnyInjected = allowAnyInjected
+        self.injectionMarker = injectionMarker
         update(configuration: configuration)
 
         let mask = Self.blockedEventTypes.reduce(CGEventMask(0)) { result, type in
@@ -70,6 +70,7 @@ final class InputBlocker {
         lock.lock()
         allowedPIDs.removeAll()
         deniedPIDs.removeAll()
+        injectionMarker = nil
         lock.unlock()
     }
 
@@ -114,7 +115,8 @@ final class InputBlocker {
             pid: pid,
             allowedPIDs: allowedPIDs,
             deniedPIDs: deniedPIDs,
-            allowAnyInjected: allowAnyInjected
+            injectionMarker: injectionMarker,
+            eventMarker: event.getIntegerValueField(.eventSourceUserData)
         )
         if allowed { allowedCount += 1 } else { blockedCount += 1 }
         lock.unlock()

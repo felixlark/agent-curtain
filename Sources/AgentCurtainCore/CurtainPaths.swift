@@ -19,6 +19,7 @@ public struct CurtainPaths: Sendable {
     public var recoveryLock: URL { stateDirectory.appendingPathComponent("recovery.lock") }
     /// 见 CurtainExpectation —— 外部看护靠它判断幕帘是不是掉了。
     public var expectation: URL { stateDirectory.appendingPathComponent("expected") }
+    public var injectionMarker: URL { stateDirectory.appendingPathComponent("injection-marker") }
 
     public func prepareDirectories() throws {
         try FileManager.default.createDirectory(

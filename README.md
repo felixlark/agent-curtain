@@ -96,10 +96,20 @@ The existing timed form remains supported:
 
 ```bash
 curtain on 3600
-curtain on --allow-any-injected
+curtain on 30 --allow-marker
 ```
 
-`--allow-any-injected` is rejected unless the denylist is non-empty. The global
+`--allow-marker` generates a fresh nonzero signed 64-bit session marker. Read it
+as an `Int64` from `~/.local/state/curtain/injection-marker` (mode 0600) and set
+`.eventSourceUserData` on **every** injected event before posting to
+`.cghidEventTap`. A matching marker permits short-lived injectors without PID
+refresh; deny rules still win. Opening the curtain revokes and removes the marker.
+The response also includes `injectionMarker`; avoid JavaScript Number rounding
+and do not log or share the live value. Repeating `on` while already drawn retains
+the current session; use `off` first to change modes. The old
+`--allow-any-injected` option is disabled and rejected.
+
+Marker mode displays “屏幕关闭·仅放行注入” in the menu and banner. The global
 shortcuts are:
 
 - `Ctrl+Opt+Cmd+L`: draw the curtain;

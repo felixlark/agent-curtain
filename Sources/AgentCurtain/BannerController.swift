@@ -2,12 +2,13 @@ import AppKit
 
 final class BannerController {
     enum Presentation: CaseIterable {
-        case enabling, protected, disabling, released, failed
+        case enabling, protected, markerProtected, disabling, released, failed
 
         var status: String {
             switch self {
             case .enabling: return "启用中"
             case .protected: return "屏幕关闭·输入锁定"
+            case .markerProtected: return "屏幕关闭·仅放行注入"
             case .disabling: return "解除中"
             case .released: return "已解除"
             case .failed: return "操作失败"
@@ -17,7 +18,7 @@ final class BannerController {
         var detail: String {
             switch self {
             case .enabling: return "⌃⌥⌘U 取消"
-            case .protected: return "⌃⌥⌘U 解除"
+            case .protected, .markerProtected: return "⌃⌥⌘U 解除"
             case .disabling: return "恢复屏幕…"
             case .released: return "可正常操作"
             case .failed: return "请查看菜单"
@@ -26,14 +27,14 @@ final class BannerController {
 
         var background: NSColor {
             switch self {
-            case .protected: return BannerController.featureColor
+            case .protected, .markerProtected: return BannerController.featureColor
             case .enabling, .disabling: return NSColor(srgbRed: 1, green: 0.86, blue: 0.86, alpha: 1)
             case .released: return NSColor(srgbRed: 0.90, green: 0.96, blue: 0.92, alpha: 1)
             case .failed: return NSColor(srgbRed: 1, green: 0.88, blue: 0.70, alpha: 1)
             }
         }
 
-        var foreground: NSColor { self == .protected ? .white : NSColor(srgbRed: 0.40, green: 0.12, blue: 0.12, alpha: 1) }
+        var foreground: NSColor { self == .protected || self == .markerProtected ? .white : NSColor(srgbRed: 0.40, green: 0.12, blue: 0.12, alpha: 1) }
     }
 
     static let featureColor = NSColor(srgbRed: 0.75, green: 0.10, blue: 0.10, alpha: 1)

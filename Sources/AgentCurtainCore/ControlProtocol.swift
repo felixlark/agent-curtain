@@ -1,7 +1,7 @@
 import Foundation
 
 public enum ControlCommand: Equatable, Sendable {
-    case draw(duration: TimeInterval?, allowAnyInjected: Bool)
+    case draw(duration: TimeInterval?, injectionMarker: Int64?)
     case open
     case status
     case reload
@@ -26,18 +26,22 @@ public enum ControlCommand: Equatable, Sendable {
             return .quit
         case "on":
             var duration: TimeInterval?
-            var allowAny = false
+            var allowMarker = false
             for field in fields.dropFirst() {
-                if field == "--allow-any-injected" {
-                    guard !allowAny else { throw ControlProtocolError.invalidArguments }
-                    allowAny = true
-                } else if let value = TimeInterval(field), value > 0, duration == nil {
+                if field == "--allow-marker" {
+                    guard !allowMarker else { throw ControlProtocolError.invalidArguments }
+                    allowMarker = true
+                } else if let value = TimeInterval(field), value.isFinite, value > 0, duration == nil {
                     duration = value
                 } else {
                     throw ControlProtocolError.invalidArguments
                 }
             }
-            return .draw(duration: duration, allowAnyInjected: allowAny)
+            var marker: Int64?
+            if allowMarker {
+                repeat { marker = Int64.random(in: Int64.min...Int64.max) } while marker == 0
+            }
+            return .draw(duration: duration, injectionMarker: marker)
         default:
             throw ControlProtocolError.unknownCommand
         }
@@ -61,6 +65,7 @@ public enum ControlProtocolError: Error, LocalizedError {
 public struct ControlResponse: Codable, Equatable, Sendable {
     public var ok: Bool
     public var state: String?
+    public var injectionMarker: Int64?
     public var displays: Int?
     public var activeDisplays: Int?
     public var displayMode: String?
@@ -81,6 +86,7 @@ public struct ControlResponse: Codable, Equatable, Sendable {
     public init(
         ok: Bool,
         state: String? = nil,
+        injectionMarker: Int64? = nil,
         displays: Int? = nil,
         activeDisplays: Int? = nil,
         displayMode: String? = nil,
@@ -100,6 +106,7 @@ public struct ControlResponse: Codable, Equatable, Sendable {
     ) {
         self.ok = ok
         self.state = state
+        self.injectionMarker = injectionMarker
         self.displays = displays
         self.activeDisplays = activeDisplays
         self.displayMode = displayMode

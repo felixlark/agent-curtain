@@ -88,10 +88,16 @@ curtain doctor
 
 ```bash
 curtain on 3600
-curtain on --allow-any-injected
+curtain on 30 --allow-marker
 ```
 
-拒绝名单为空时，`--allow-any-injected` 会被拒绝。全局快捷键：
+`--allow-marker` 为本次保护生成非零 64 位随机暗号，返回 `injectionMarker`，并写入
+`~/.local/state/curtain/injection-marker`（0600）。注入程序将文件中的十进制值按 `Int64`
+读取，在**每个**事件上设置 `.eventSourceUserData`，再投递到 `.cghidEventTap`。
+暗号完全相等才放行短命注入进程，拒绝名单仍优先；解除保护立即撤销并清除文件。
+不要输出或转发当前暗号，也不要用 JavaScript Number 解析以免丢失 64 位精度。
+已拉上时重复 `on` 保留原会话；切换模式先 `off`。旧 `--allow-any-injected` 已禁用并报非法参数。
+暗号档菜单和横幅显示“屏幕关闭·仅放行注入”。全局快捷键：
 
 - `Ctrl+Opt+Cmd+L`：启用保护；
 - `Ctrl+Opt+Cmd+U`：解除保护，也可取消正在进行的启用操作。

@@ -27,6 +27,7 @@ final class CurtainCoordinator {
 
     private(set) var phase: Phase = .starting
     private(set) var since: Date?
+    private(set) var injectionMarker: Int64?
     private(set) var displayCount = 0
     private(set) var activeDisplayCount = 0
     private(set) var lastError: String?
@@ -50,6 +51,8 @@ final class CurtainCoordinator {
             var messages: [String] = []
             do { nextConfiguration = try CurtainConfiguration.load(from: self.paths) }
             catch { messages.append("configuration: \(error.localizedDescription)") }
+            do { try InjectionMarkerStore.clear(at: self.paths.injectionMarker) }
+            catch { messages.append("injection marker: \(error.localizedDescription)") }
 
             do {
                 let recoveryLock = try RecoveryTransactionLock(url: self.paths.recoveryLock)
@@ -79,8 +82,8 @@ final class CurtainCoordinator {
 
     func handle(_ command: ControlCommand, completion: @escaping (ControlResponse) -> Void) {
         switch command {
-        case .draw(let duration, let allowAnyInjected):
-            draw(duration: duration, allowAnyInjected: allowAnyInjected, completion: completion)
+        case .draw(let duration, let injectionMarker):
+            draw(duration: duration, injectionMarker: injectionMarker, completion: completion)
         case .open:
             open(completion: completion)
         case .status:
@@ -94,7 +97,7 @@ final class CurtainCoordinator {
 
     func draw(
         duration: TimeInterval? = nil,
-        allowAnyInjected: Bool = false,
+        injectionMarker: Int64? = nil,
         completion: @escaping (ControlResponse) -> Void
     ) {
         precondition(Thread.isMainThread)
@@ -112,8 +115,8 @@ final class CurtainCoordinator {
             completion(ControlResponse(ok: false, state: "open", error: lastError))
             return
         }
-        if allowAnyInjected && configuration.deniedRules.isEmpty {
-            completion(ControlResponse(ok: false, state: "open", error: "--allow-any-injected requires a non-empty denylist"))
+        if injectionMarker == 0 {
+            completion(ControlResponse(ok: false, state: "open", error: "injection marker must be nonzero"))
             return
         }
 
@@ -138,9 +141,15 @@ final class CurtainCoordinator {
                         return
                     }
                     do {
+                        if let injectionMarker {
+                            try InjectionMarkerStore.write(injectionMarker, to: self.paths.injectionMarker)
+                        } else {
+                            try InjectionMarkerStore.clear(at: self.paths.injectionMarker)
+                        }
+                        self.injectionMarker = injectionMarker
                         try self.blocker.start(
                             configuration: self.configuration,
-                            allowAnyInjected: allowAnyInjected
+                            injectionMarker: injectionMarker
                         )
                         self.worker.async {
                             do {
@@ -154,7 +163,7 @@ final class CurtainCoordinator {
                                             error: "draw was cancelled"))
                                         return
                                     }
-                                    self.banners.show(.protected)
+                                    self.banners.show(injectionMarker == nil ? .protected : .markerProtected)
                                     self.displayCount = count
                                     self.activeDisplayCount = 1
                                     self.since = Date()
@@ -185,8 +194,19 @@ final class CurtainCoordinator {
 
     func open(completion: @escaping (ControlResponse) -> Void) {
         precondition(Thread.isMainThread)
+        var markerClearError: Error?
+        if phase != .starting {
+            injectionMarker = nil
+            do { try InjectionMarkerStore.clear(at: paths.injectionMarker) }
+            catch { markerClearError = error }
+        }
         if phase == .open && lastError == nil {
-            completion(response(ok: true))
+            if let markerClearError {
+                completion(ControlResponse(ok: false, state: phase.rawValue,
+                    error: "cannot clear injection marker: \(markerClearError.localizedDescription)"))
+            } else {
+                completion(response(ok: true))
+            }
             return
         }
         if phase == .starting {
@@ -211,12 +231,14 @@ final class CurtainCoordinator {
         autoOpenTimer = nil
         blocker.stop()
         changed()
+        let cleanupError = markerClearError
         worker.async { [weak self] in
             guard let self else { return }
             let restoration = self.restoreProtectionState()
+            let errors = [restoration.error?.localizedDescription, cleanupError?.localizedDescription].compactMap { $0 }
             DispatchQueue.main.async {
                 self.finishOpening(
-                    restoreError: restoration.error,
+                    restoreError: errors.isEmpty ? nil : CurtainRecoveryError(messages: errors),
                     restoredActiveDisplayCount: restoration.activeDisplayCount
                 )
             }
@@ -232,6 +254,8 @@ final class CurtainCoordinator {
         drawCancellation?.cancel()
         drawCancellation = nil
         blocker.stop()
+        injectionMarker = nil
+        try? InjectionMarkerStore.clear(at: paths.injectionMarker)
         lastError = error.localizedDescription
         banners.show(.disabling)
         changed()
@@ -336,6 +360,7 @@ final class CurtainCoordinator {
         return ControlResponse(
             ok: ok,
             state: stableState,
+            injectionMarker: injectionMarker,
             displays: displayCount,
             activeDisplays: activeDisplayCount,
             displayMode: phase == .drawn ? "internal-only" : (restorePending > 0 ? "restore-pending" : "all-displays"),
@@ -359,7 +384,8 @@ final class CurtainCoordinator {
         let counters = blocker.counters()
         switch phase {
         case .drawn:
-            return "屏幕关闭·输入锁定 · 仅内屏 · 阻断 \(counters.blocked) · 放行 \(counters.allowed)"
+            let title = injectionMarker == nil ? "屏幕关闭·输入锁定" : "屏幕关闭·仅放行注入"
+            return "\(title) · 仅内屏 · 阻断 \(counters.blocked) · 放行 \(counters.allowed)"
         case .open:
             return lastError.map { "操作未完成 · \($0)" } ?? "已解除保护"
         case .starting: return "正在启动…"
