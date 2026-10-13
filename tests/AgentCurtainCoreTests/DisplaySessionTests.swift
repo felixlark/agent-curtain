@@ -4,6 +4,34 @@ import Testing
 @testable import AgentCurtainCore
 
 @Suite(.serialized) struct DisplaySessionTests {
+    @Test func portraitReconnectWaitsForModeRefreshWithoutWritingTransientResolution() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cli = root.appendingPathComponent("cli")
+        try #"""
+        #!/bin/sh
+        if [ "$1" = set ]; then
+            touch "${0%/*}/wrote-mode"; echo Failed. >&2; exit 1
+        fi
+        n=$(cat "${0%/*}/reads" 2>/dev/null || echo 0)
+        n=$((n+1)); echo "$n" > "${0%/*}/reads"
+        if [ "$n" -lt 4 ]; then echo 2048x1152; else echo 1152x2048; fi
+        """#.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: cli.path)
+        let client = try BetterDisplayClient(executable: cli, application: nil)
+        try client.restoreFeatureAfterSettling("resolution", value: "1152x2048", uuid: "portrait")
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("wrote-mode").path))
+    }
+
+    @Test func parsesSignedPlacementWithoutGuessingInvalidCoordinates() {
+        #expect(DisplaySessionOperations.placementOrigin("-2048x568")?.0 == -2048)
+        #expect(DisplaySessionOperations.placementOrigin("0x1440")?.1 == 1440)
+        #expect(DisplaySessionOperations.placementOrigin("1x2x3") == nil)
+        #expect(DisplaySessionOperations.placementOrigin("nanx0") == nil)
+        #expect(DisplaySessionOperations.placementOrigin("2147483648x0") == nil)
+    }
+
     @Test func backupRoundTripsWithSecurePermissions() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -77,6 +105,22 @@ import Testing
         #expect(!log.contains("-displayID="))
     }
 
+    @Test func restoresMainBeforeValidatingResolution() throws {
+        let fixture = try DisplayFixture()
+        defer { fixture.remove() }
+        let original = try String(contentsOf: fixture.cli, encoding: .utf8)
+        let changed = original.replacingOccurrences(of: "'get -UUID=internal -resolution') echo 1512x982 ;;",
+            with: "'get -UUID=internal -resolution') [ \"$main\" = external ] && echo 1512x982 || echo 1512x945 ;;")
+        try changed.write(to: fixture.cli, atomically: false, encoding: .utf8)
+        let client = try fixture.client()
+        let backend = BetterDisplayConnectionBackend(client: client)
+        let backup = try DisplaySessionOperations.capture(ownerPID: 7, client: client, connectionBackend: .betterDisplay)
+        _ = try DisplaySessionOperations.disconnectExternalDisplays(backup: backup, client: client, backend: backend)
+        try DisplaySessionOperations.restore(backup, client: client, backend: backend)
+        let log = try String(contentsOf: fixture.log, encoding: .utf8)
+        #expect(!log.contains("-resolution="))
+    }
+
     @Test func legacyV1BackupDecodesWithoutBackend() throws {
         let data = Data(#"{"createdAt":1772000000000,"displays":[],"ownerPID":42,"version":1}"#.utf8)
         let decoder = JSONDecoder()
@@ -118,6 +162,23 @@ import Testing
         #expect(SystemSPICallRecorder.calls.map { Int($0.1) } == [22, 23])
         #expect(SystemSPICallRecorder.calls.allSatisfy { !$0.2 })
         #expect(Set(SystemSPICallRecorder.calls.compactMap { $0.0 }).count == 1)
+    }
+
+    @Test func slowLinkTrainingDoesNotReenableDisplayRepeatedly() throws {
+        let fixture = try DisplayFixture()
+        defer { fixture.remove() }
+        SystemSPICallRecorder.calls = []
+        SystemSPICallRecorder.activeSnapshots = Array(repeating: [1], count: 14) + [[1, 22]]
+        let backend = SystemDisplayConnectionBackend(client: try fixture.client(),
+            configureDisplayEnabled: { configuration, displayID, enabled in
+                SystemSPICallRecorder.calls.append((configuration, displayID, enabled))
+                return .success
+            }, activeDisplayIDs: { SystemSPICallRecorder.nextActiveSnapshot() })
+        let backup = try DisplaySessionOperations.capture(ownerPID: 7,
+            client: fixture.client(), connectionBackend: .systemSPI)
+        try backend.reconnectDisplays(backup: backup)
+        #expect(SystemSPICallRecorder.calls.map { Int($0.1) } == [22])
+        #expect(SystemSPICallRecorder.calls.allSatisfy { $0.2 })
     }
 
     @Test func systemSPIRestoreSkipsAlreadyActiveDisplays() throws {

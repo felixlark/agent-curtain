@@ -21,7 +21,9 @@ final class BrightnessController {
         let identities = try client.displays()
         let displays = try identities.map { identity in
             if isCancelled() { throw CancellationError() }
-            return DisplayBrightness(displayID: identity.displayID, brightness: try client.brightness(displayID: identity.displayID), uuid: identity.uuid)
+            return DisplayBrightness(displayID: identity.displayID, brightness: try client.brightness(displayID: identity.displayID), uuid: identity.uuid,
+                hardwareBrightness: try? client.brightnessComponent("hardwareBrightness", displayID: identity.displayID),
+                softwareBrightness: try? client.brightnessComponent("softwareBrightness", displayID: identity.displayID))
         }
         if isCancelled() { throw CancellationError() }
         let backup = BrightnessBackup(ownerPID: getpid(), displays: displays)
@@ -60,7 +62,9 @@ final class BrightnessController {
         for claimed in RecoveryClaimFiles.unique(candidates) {
             do {
                 let backup = try BrightnessBackupStore.read(from: claimed)
-                try BrightnessRestoration.restore(backup, client: client)
+                do { try BrightnessRestoration.restore(backup, client: client) }
+                catch { recordAudit(backup: backup, client: client, error: error); throw error }
+                recordAudit(backup: backup, client: client, error: nil)
                 try FileManager.default.removeItem(at: claimed)
             } catch {
                 firstError = firstError ?? error
@@ -72,6 +76,29 @@ final class BrightnessController {
         watchdog = nil
         try? watchdogLogHandle?.close()
         watchdogLogHandle = nil
+    }
+
+    private func recordAudit(backup: BrightnessBackup, client: BetterDisplayClient, error: Error?) {
+        struct Audit: Encodable {
+            let before: BrightnessBackup
+            let after: [DisplayBrightness]
+            let error: String?
+        }
+        let identities = (try? client.displays()) ?? []
+        let after = backup.displays.compactMap { saved -> DisplayBrightness? in
+            guard let id = try? BrightnessRestoration.target(for: saved, active: identities),
+                  let total = try? client.brightness(displayID: id) else { return nil }
+            return DisplayBrightness(displayID: id, brightness: total, uuid: saved.uuid,
+                hardwareBrightness: try? client.brightnessComponent("hardwareBrightness", displayID: id),
+                softwareBrightness: try? client.brightnessComponent("softwareBrightness", displayID: id))
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        if let data = try? encoder.encode(Audit(before: backup, after: after, error: error?.localizedDescription)) {
+            let url = paths.stateDirectory.appendingPathComponent("last-brightness-recovery.json")
+            try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
     }
 
     func dimNewDisplays() throws -> Int {

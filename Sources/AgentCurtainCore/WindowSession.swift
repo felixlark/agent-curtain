@@ -118,6 +118,38 @@ public enum WindowSessionBackupStore {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
+    /// A new explicit draw supersedes old window placement, never hardware recovery.
+    /// Copy evidence before atomically publishing the fresh snapshot. On failure the
+    /// old active record remains available; archived records are never auto-replayed.
+    public static func beginSession(_ backup: WindowSessionBackup, at url: URL) throws -> URL? {
+        let fm = FileManager.default
+        let directory = url.deletingLastPathComponent()
+        let claims = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("window-session.json.restoring.") }
+        let recoverable = RecoveryClaimFiles.recoverable(in: directory, prefix: "window-session.json.restoring.")
+        guard Set(claims).isSubset(of: Set(recoverable)) else {
+            throw WindowSessionError.restoreFailures(["another process is restoring windows"])
+        }
+        let prior = (fm.fileExists(atPath: url.path) ? [url] : []) + recoverable
+        var archive: URL?
+        if !prior.isEmpty {
+            let destination = directory.appendingPathComponent("window-history/\(UUID().uuidString)")
+            try fm.createDirectory(at: destination, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            for source in prior {
+                let copy = destination.appendingPathComponent(source.lastPathComponent)
+                try fm.copyItem(at: source, to: copy)
+                try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: copy.path)
+            }
+            archive = destination
+        }
+        // Retire abandoned claims only after every record has been preserved.
+        // If publication then fails, the original remains and claims are in history.
+        for claim in recoverable { try fm.removeItem(at: claim) }
+        try write(backup, to: url)
+        return archive
+    }
+
     public static func read(from url: URL) throws -> WindowSessionBackup {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .millisecondsSince1970
@@ -168,6 +200,30 @@ public struct WindowMatchCandidate: Equatable, Sendable {
 }
 
 public enum WindowSessionPlanner {
+    public static func shouldManageWindow(bundleIdentifier: String?, subrole: String, hasScreenWindow: Bool) -> Bool {
+        // macOS owns menu-bar geometry. AX exposes these as movable dialogs,
+        // but WindowServer immediately relocates them after our writes.
+        if bundleIdentifier == "com.apple.MenuBarAgent" { return false }
+        // Transient AX dialogs without a layer-zero WindowServer window are not
+        // desktop windows; they can disappear or change identity during reflow.
+        return subrole != kAXDialogSubrole as String || hasScreenWindow
+    }
+
+    public static func isOriginalProcess(launchDate: Date?, capturedAt: Date) -> Bool {
+        guard let launchDate else { return false }
+        return launchDate <= capturedAt
+    }
+
+    // A spanning window may have its center in a gap. Use largest overlap, and
+    // include the built-in display because main-display changes also move its windows.
+    public static func captureDisplay(for frame: WindowSessionRect, displays: [WindowDisplayGeometry]) -> WindowDisplayGeometry? {
+        displays.filter { frame.cgRect.intersects($0.bounds.cgRect) }.max {
+            let left = frame.cgRect.intersection($0.bounds.cgRect)
+            let right = frame.cgRect.intersection($1.bounds.cgRect)
+            return left.width * left.height < right.width * right.height
+        }
+    }
+
     public static func relativeFrame(_ frame: WindowSessionRect, in display: WindowSessionRect) -> WindowSessionRect {
         guard display.width > 0, display.height > 0 else { return frame }
         return WindowSessionRect(
@@ -188,6 +244,17 @@ public enum WindowSessionPlanner {
             y: (display.bounds.y + relative.y * display.bounds.height).rounded(),
             width: max(1, (relative.width * display.bounds.width).rounded()),
             height: max(1, (relative.height * display.bounds.height).rounded())
+        )
+    }
+
+    public static func frameFittingVisibleArea(_ target: WindowSessionRect, in visible: WindowSessionRect) -> WindowSessionRect {
+        let width = min(target.width, visible.width)
+        let height = min(target.height, visible.height)
+        return WindowSessionRect(
+            x: min(max(target.x, visible.x), visible.x + visible.width - width),
+            y: min(max(target.y, visible.y), visible.y + visible.height - height),
+            width: width,
+            height: height
         )
     }
 
@@ -222,7 +289,7 @@ public enum WindowSessionPlanner {
 
         // AX returns windows in stable application order during a display topology change.
         // Use that order only when no windows appeared or disappeared in this application.
-        if saved.count == candidates.count {
+        if trustWindowIDs && saved.count == candidates.count {
             assign { saved, candidate in
                 saved.ordinal == candidate.ordinal && compatible(saved, candidate)
             }
@@ -253,11 +320,17 @@ public struct WindowRestorationReport: Equatable, Sendable {
     public let saved: Int
     public let restored: Int
     public let disappeared: Int
+    public let excluded: Int
+    public let remaining: [SavedWindow]
+    public let failures: [String]
 
-    public init(saved: Int, restored: Int, disappeared: Int) {
+    public init(saved: Int, restored: Int, disappeared: Int, excluded: Int = 0, remaining: [SavedWindow] = [], failures: [String] = []) {
         self.saved = saved
         self.restored = restored
         self.disappeared = disappeared
+        self.excluded = excluded
+        self.remaining = remaining
+        self.failures = failures
     }
 }
 
@@ -286,7 +359,6 @@ public enum WindowSessionOperations {
         guard AXIsProcessTrusted() else { throw WindowSessionError.accessibilityPermission }
         let displays = activeDisplayGeometries()
         guard !displays.isEmpty else { throw WindowSessionError.noActiveDisplays }
-        let external = displays.filter { !$0.isBuiltin }
         let cgWindows = cgWindowSnapshots()
         var saved: [SavedWindow] = []
 
@@ -302,7 +374,7 @@ public enum WindowSessionOperations {
                       axBool(window, kAXMinimizedAttribute as CFString) != true,
                       axBool(window, "AXFullScreen" as CFString) != true,
                       let frame = axWindowFrame(window),
-                      let display = external.first(where: { contains($0.bounds, frame.center) }) else { continue }
+                      let display = WindowSessionPlanner.captureDisplay(for: frame, displays: displays) else { continue }
                 let metadata = matchCGWindow(
                     pid: pid,
                     frame: frame,
@@ -311,7 +383,10 @@ public enum WindowSessionOperations {
                 )
                 // A definite offscreen CG window belongs to another Space. Missing CG metadata
                 // is not enough reason to discard an otherwise movable AX window.
-                guard metadata?.isOnscreen != false else { continue }
+                guard metadata?.isOnscreen != false,
+                      WindowSessionPlanner.shouldManageWindow(bundleIdentifier: application.bundleIdentifier,
+                        subrole: axString(window, kAXSubroleAttribute as CFString) ?? "",
+                        hasScreenWindow: metadata != nil) else { continue }
                 saved.append(SavedWindow(
                     ownerPID: pid,
                     bundleIdentifier: application.bundleIdentifier,
@@ -335,71 +410,89 @@ public enum WindowSessionOperations {
         guard backup.windows.isEmpty || AXIsProcessTrusted() else {
             throw WindowSessionError.accessibilityPermission
         }
-        let neededUUIDs = Set(backup.windows.map(\.displayUUID))
+        let managed = backup.windows.filter {
+            WindowSessionPlanner.shouldManageWindow(bundleIdentifier: $0.bundleIdentifier,
+                subrole: $0.subrole, hasScreenWindow: $0.windowID != nil)
+        }
+        let excluded = backup.windows.count - managed.count
+        let selection = WindowApplicationSelection.resolve(managed) {
+            try runningApplication(for: ApplicationIdentity($0), capturedAt: backup.createdAt) != nil
+        }
+        let surviving = selection.surviving
+        var disappeared = selection.disappeared
+        var unresolved = selection.failures
+        var unmatched = selection.remaining
+        let neededUUIDs = Set(surviving.map(\.displayUUID))
         let displays = waitForDisplays(neededUUIDs: neededUUIDs)
         let missing = neededUUIDs.subtracting(displays.keys).sorted()
         guard missing.isEmpty else { throw WindowSessionError.missingDisplays(missing) }
-        if backup.windows.isEmpty {
-            return WindowRestorationReport(saved: 0, restored: 0, disappeared: 0)
+        if surviving.isEmpty {
+            return WindowRestorationReport(saved: backup.windows.count, restored: 0,
+                disappeared: disappeared, excluded: excluded, remaining: unmatched, failures: unresolved)
         }
 
         // WindowServer reports geometry before every application has handled its screen-change
         // notification. Let that first wave settle, then verify all windows together below.
         Thread.sleep(forTimeInterval: 0.5)
-        let grouped = Dictionary(grouping: backup.windows, by: ApplicationIdentity.init)
-        var disappeared = 0
+        let grouped = Dictionary(grouping: surviving, by: ApplicationIdentity.init)
         var tasks: [WindowRestoreTask] = []
-        var unresolved: [String] = []
 
         for (identity, savedWindows) in grouped {
-            guard let resolvedApplication = runningApplication(for: identity) else {
-                disappeared += savedWindows.count
-                continue
-            }
-            let application = resolvedApplication.application
-            let appElement = AXUIElementCreateApplication(application.processIdentifier)
-            let elements = axWindows(in: appElement).filter(isRestorableWindow)
-            let snapshots = cgWindowSnapshots().filter { $0.pid == application.processIdentifier }
-            let live = elements.enumerated().map { ordinal, element in
-                let frame = axWindowFrame(element)
-                let metadata = frame.flatMap {
-                    matchCGWindow(pid: application.processIdentifier, frame: $0,
-                        title: axString(element, kAXTitleAttribute as CFString), snapshots: snapshots)
-                }
-                return LiveWindow(
-                    element: element,
-                    match: WindowMatchCandidate(
-                        windowID: metadata?.windowID,
-                        identifier: axString(element, kAXIdentifierAttribute as CFString),
-                        title: axString(element, kAXTitleAttribute as CFString),
-                        role: axString(element, kAXRoleAttribute as CFString) ?? "",
-                        subrole: axString(element, kAXSubroleAttribute as CFString) ?? "",
-                        ordinal: ordinal
-                    )
-                )
-            }
-            let matches = WindowSessionPlanner.matches(
-                saved: savedWindows,
-                candidates: live.map(\.match),
-                trustWindowIDs: resolvedApplication.sameProcess
-            )
-            let currentWindowIDs = Set(snapshots.map(\.windowID))
-            for savedIndex in savedWindows.indices {
-                guard let liveIndex = matches[savedIndex] else {
-                    let saved = savedWindows[savedIndex]
-                    if resolvedApplication.sameProcess,
-                       let windowID = saved.windowID,
-                       !currentWindowIDs.contains(windowID) {
-                        disappeared += 1
-                    } else {
-                        unresolved.append("\(saved.applicationName) window \(saved.windowID.map(String.init) ?? String(saved.ordinal))")
-                    }
+            do {
+                guard let resolvedApplication = try runningApplication(for: identity, capturedAt: backup.createdAt) else {
+                    disappeared += savedWindows.count
                     continue
                 }
-                let saved = savedWindows[savedIndex]
-                guard let display = displays[saved.displayUUID] else { continue }
-                let target = WindowSessionPlanner.targetFrame(for: saved, on: display)
-                tasks.append(WindowRestoreTask(saved: saved, element: live[liveIndex].element, target: target))
+                let application = resolvedApplication.application
+                let appElement = AXUIElementCreateApplication(application.processIdentifier)
+                let elements = try reliableAXWindows(in: appElement)
+                let snapshots = cgWindowSnapshots().filter { $0.pid == application.processIdentifier }
+                let live = elements.enumerated().compactMap { ordinal, element -> LiveWindow? in
+                    guard isRestorableWindow(element) else { return nil }
+                    let frame = axWindowFrame(element)
+                    let metadata = frame.flatMap {
+                        matchCGWindow(pid: application.processIdentifier, frame: $0,
+                            title: axString(element, kAXTitleAttribute as CFString), snapshots: snapshots)
+                    }
+                    return LiveWindow(
+                        element: element,
+                        match: WindowMatchCandidate(
+                            windowID: metadata?.windowID,
+                            identifier: axString(element, kAXIdentifierAttribute as CFString),
+                            title: axString(element, kAXTitleAttribute as CFString),
+                            role: axString(element, kAXRoleAttribute as CFString) ?? "",
+                            subrole: axString(element, kAXSubroleAttribute as CFString) ?? "",
+                            ordinal: ordinal
+                        )
+                    )
+                }
+                let matches = WindowSessionPlanner.matches(
+                    saved: savedWindows,
+                    candidates: live.map(\.match),
+                    trustWindowIDs: resolvedApplication.sameProcess
+                )
+                let currentWindowIDs = Set(snapshots.map(\.windowID))
+                for savedIndex in savedWindows.indices {
+                    guard let liveIndex = matches[savedIndex] else {
+                        let saved = savedWindows[savedIndex]
+                        if resolvedApplication.sameProcess,
+                           let windowID = saved.windowID,
+                           !currentWindowIDs.contains(windowID) {
+                            disappeared += 1
+                        } else {
+                            unmatched.append(saved)
+                            unresolved.append("\(saved.applicationName) window \(saved.windowID.map(String.init) ?? String(saved.ordinal))")
+                        }
+                        continue
+                    }
+                    let saved = savedWindows[savedIndex]
+                    guard let display = displays[saved.displayUUID] else { continue }
+                    let target = WindowSessionPlanner.targetFrame(for: saved, on: display)
+                    tasks.append(WindowRestoreTask(saved: saved, element: live[liveIndex].element, target: target))
+                }
+            } catch {
+                unmatched.append(contentsOf: savedWindows)
+                unresolved.append(error.localizedDescription)
             }
         }
 
@@ -414,19 +507,71 @@ public enum WindowSessionOperations {
             pending = tasks.filter { axWindowFrame($0.element)?.isNear($0.target, tolerance: 2) != true }
             if pending.isEmpty {
                 stablePasses += 1
-                if stablePasses >= 2 { break }
+                if stablePasses >= 8 { break }
             } else {
                 stablePasses = 0
             }
         } while Date() < deadline
 
-        let failed = unresolved + pending.map {
-                "\($0.saved.applicationName) window \($0.saved.windowID.map(String.init) ?? String($0.saved.ordinal))"
+        // The Dock can claim space after the display reconnects. Some apps refuse to
+        // grow beyond the current visible frame even when the saved frame was valid.
+        if !pending.isEmpty {
+            let visible = visibleDisplayFrames()
+            let fallback = pending.compactMap { task -> WindowRestoreTask? in
+                guard let area = visible[task.saved.displayUUID] else { return nil }
+                let fitted = WindowSessionPlanner.frameFittingVisibleArea(task.target, in: area)
+                guard fitted != task.target else { return nil }
+                return WindowRestoreTask(saved: task.saved, element: task.element, target: fitted)
             }
-        guard failed.isEmpty else {
-            throw WindowSessionError.restoreFailures(failed)
+            let fallbackDeadline = Date().addingTimeInterval(2)
+            for task in fallback {
+                repeat {
+                    if axWindowFrame(task.element)?.isNear(task.target, tolerance: 2) == true { break }
+                    _ = applyWindowFramePrecisely(task.element, frame: task.target)
+                    Thread.sleep(forTimeInterval: 0.15)
+                } while Date() < fallbackDeadline
+            }
+            pending.removeAll { original in
+                fallback.contains { fitted in
+                    fitted.saved == original.saved &&
+                        axWindowFrame(fitted.element)?.isNear(fitted.target, tolerance: 2) == true
+                }
+            }
         }
-        return WindowRestorationReport(saved: backup.windows.count, restored: tasks.count, disappeared: disappeared)
+
+        let failed = unresolved + pending.map {
+                "\($0.saved.applicationName) window \($0.saved.windowID.map(String.init) ?? String($0.saved.ordinal)) target=\($0.target) actual=\(String(describing: axWindowFrame($0.element)))"
+            }
+        return WindowRestorationReport(saved: backup.windows.count,
+            restored: tasks.count - pending.count, disappeared: disappeared, excluded: excluded,
+            remaining: unmatched + pending.map(\.saved), failures: failed)
+    }
+}
+
+// Resolve once per application, retaining unknown targets while allowing unrelated
+// applications to proceed. This selection does not access or manipulate the GUI.
+struct WindowApplicationSelection {
+    var surviving: [SavedWindow] = []
+    var remaining: [SavedWindow] = []
+    var disappeared = 0
+    var failures: [String] = []
+
+    static func resolve(_ windows: [SavedWindow],
+                        applicationExists: (SavedWindow) throws -> Bool) -> Self {
+        var result = Self()
+        for group in Dictionary(grouping: windows, by: ApplicationIdentity.init).values {
+            do {
+                if try applicationExists(group[0]) {
+                    result.surviving.append(contentsOf: group)
+                } else {
+                    result.disappeared += group.count
+                }
+            } catch {
+                result.remaining.append(contentsOf: group)
+                result.failures.append(error.localizedDescription)
+            }
+        }
+        return result
     }
 }
 
@@ -477,6 +622,26 @@ private func activeDisplayGeometries() -> [WindowDisplayGeometry] {
     }
 }
 
+private func visibleDisplayFrames() -> [String: WindowSessionRect] {
+    var result: [String: WindowSessionRect] = [:]
+    for screen in NSScreen.screens {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { continue }
+        let id = CGDirectDisplayID(number.uint32Value)
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue(),
+              let key = CFUUIDCreateString(nil, uuid) as String? else { continue }
+        let bounds = CGDisplayBounds(id)
+        let frame = screen.frame
+        let usable = screen.visibleFrame
+        result[key] = WindowSessionRect(
+            x: bounds.minX + usable.minX - frame.minX,
+            y: bounds.minY + frame.maxY - usable.maxY,
+            width: usable.width,
+            height: usable.height
+        )
+    }
+    return result
+}
+
 private func waitForDisplays(neededUUIDs: Set<String>, timeout: TimeInterval = 4) -> [String: WindowDisplayGeometry] {
     guard !neededUUIDs.isEmpty else { return [:] }
     let deadline = Date().addingTimeInterval(timeout)
@@ -498,19 +663,75 @@ private func waitForDisplays(neededUUIDs: Set<String>, timeout: TimeInterval = 4
     return previous
 }
 
-private func runningApplication(for identity: ApplicationIdentity) -> (application: NSRunningApplication, sameProcess: Bool)? {
-    if let existing = NSRunningApplication(processIdentifier: identity.ownerPID),
-       identity.bundleIdentifier == nil || existing.bundleIdentifier == identity.bundleIdentifier {
-        return (existing, true)
+// NSRunningApplication.launchDate can be nil for long-lived system apps such as
+// Finder. libproc supplies the kernel start time without requiring new privileges.
+// A short/failed read remains unknown; never infer that the process disappeared.
+enum ProcessStartTime {
+    static func read(pid: Int32) -> Date? {
+        guard pid > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size,
+              info.pbi_pid == UInt32(pid), info.pbi_start_tvsec > 0,
+              info.pbi_start_tvusec < 1_000_000 else { return nil }
+        return Date(timeIntervalSince1970: Double(info.pbi_start_tvsec) +
+            Double(info.pbi_start_tvusec) / 1_000_000)
     }
-    if let bundleIdentifier = identity.bundleIdentifier {
-        let matches = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
-        if matches.count == 1 { return (matches[0], false) }
+}
+
+private func runningApplication(for identity: ApplicationIdentity, capturedAt: Date) throws -> (application: NSRunningApplication, sameProcess: Bool)? {
+    // The kernel is authoritative for PID lifetime; application metadata may lag
+    // WindowServer reconfiguration. A live PID with unavailable metadata is unknown,
+    // never proof that the saved windows disappeared.
+    guard let existing = try WindowApplicationMetadata.resolve(
+        pid: identity.ownerPID, capturedAt: capturedAt, expectedBundleIdentifier: identity.bundleIdentifier,
+        application: { NSRunningApplication(processIdentifier: identity.ownerPID) },
+        bundleIdentifier: { $0.bundleIdentifier }
+    ) else { return nil }
+    return (existing, true)
+}
+
+// LaunchServices metadata can be temporarily absent during wake/display recovery.
+// Keep the retry bounded, and recheck kernel lifetime on every sample so that a
+// terminated or reused PID cannot become a restoration target during the wait.
+enum WindowApplicationMetadata {
+    static func resolve<Application>(
+        pid: Int32, capturedAt: Date, expectedBundleIdentifier: String?,
+        isAlive: (() -> Bool)? = nil,
+        startTime: (() -> Date?)? = nil,
+        application: () -> Application?,
+        bundleIdentifier: (Application) -> String?,
+        attempts: Int = 11,
+        wait: () -> Void = { Thread.sleep(forTimeInterval: 0.1) }
+    ) throws -> Application? {
+        for attempt in 0..<max(1, attempts) {
+            guard isAlive?() ?? (kill(pid, 0) == 0 || errno == EPERM) else { return nil }
+            guard let launchDate = startTime.map({ $0() }) ?? ProcessStartTime.read(pid: pid) else {
+                throw WindowSessionError.restoreFailures(["cannot verify process lifetime for pid \(pid)"])
+            }
+            guard WindowSessionPlanner.isOriginalProcess(launchDate: launchDate, capturedAt: capturedAt) else { return nil }
+            if let existing = application() {
+                let actual = bundleIdentifier(existing)
+                if expectedBundleIdentifier == nil || actual == expectedBundleIdentifier { return existing }
+                if let actual {
+                    throw WindowSessionError.restoreFailures(["application identity mismatch for live pid \(pid): expected \(expectedBundleIdentifier!), got \(actual)"])
+                }
+            }
+            if attempt + 1 < max(1, attempts) { wait() }
+        }
+        throw WindowSessionError.restoreFailures(["application metadata unavailable for live pid \(pid)"])
     }
-    let matches = NSWorkspace.shared.runningApplications.filter {
-        $0.localizedName == identity.applicationName && $0.activationPolicy != .prohibited
+}
+
+private func reliableAXWindows(in application: AXUIElement) throws -> [AXUIElement] {
+    var value: CFTypeRef?
+    let error = AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value)
+    guard error == .success, let windows = value as? [AXUIElement] else {
+        var pid = pid_t()
+        _ = AXUIElementGetPid(application, &pid)
+        throw WindowSessionError.restoreFailures(["cannot enumerate live windows for pid \(pid): AXError=\(error.rawValue)"])
     }
-    return matches.count == 1 ? (matches[0], false) : nil
+    return windows
 }
 
 private func axWindows(in application: AXUIElement) -> [AXUIElement] {
@@ -527,11 +748,8 @@ private func isRestorableWindow(_ window: AXUIElement) -> Bool {
         return false
     }
     var positionSettable = DarwinBoolean(false)
-    var sizeSettable = DarwinBoolean(false)
     return AXUIElementIsAttributeSettable(window, kAXPositionAttribute as CFString, &positionSettable) == .success &&
-        positionSettable.boolValue &&
-        AXUIElementIsAttributeSettable(window, kAXSizeAttribute as CFString, &sizeSettable) == .success &&
-        sizeSettable.boolValue
+        positionSettable.boolValue
 }
 
 private func axWindowFrame(_ window: AXUIElement) -> WindowSessionRect? {

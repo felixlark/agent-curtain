@@ -72,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleShortcut(_ event: NSEvent) {
-        let required: NSEvent.ModifierFlags = [.control, .option, .command, .shift]
+        let required: NSEvent.ModifierFlags = [.control, .option, .command]
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).isSuperset(of: required) else { return }
         if event.keyCode == 37, coordinator.phase == .open {
             coordinator.draw { _ in }

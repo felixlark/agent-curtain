@@ -28,7 +28,7 @@ component that needs Accessibility permission. It contains:
 - a `kCGHIDEventTap` blocker with deny-before-allow decisions;
 - one framebuffer-visible banner window per display;
 - system display SPI for disconnecting and reconnecting external displays, with UUID topology restoration;
-- a mode-0600 window snapshot that returns visible external-display windows to their original display and frame;
+- a mode-0600 window snapshot that returns visible windows on all displays to their original display and frame;
 - BetterDisplay for brightness and layout, with Pro connection management used only if the system SPI is unavailable;
 - a mode-0600 Unix socket at `~/.local/state/curtain/control.sock`;
 - an embedded recovery watchdog that reconnects displays and restores brightness if the app is killed, then relaunches AgentCurtain to restore window frames under the app's Accessibility permission.
@@ -102,8 +102,8 @@ curtain on --allow-any-injected
 `--allow-any-injected` is rejected unless the denylist is non-empty. The global
 shortcuts are:
 
-- `Ctrl+Opt+Cmd+Shift+L`: draw the curtain;
-- `Ctrl+Opt+Cmd+Shift+U`: open it again.
+- `Ctrl+Opt+Cmd+L`: draw the curtain;
+- `Ctrl+Opt+Cmd+U`: open it again.
 
 The release shortcut is checked inside the HID callback before the keystroke is
 swallowed. `curtain off` only talks to the app socket and never requires
@@ -126,7 +126,7 @@ The default denylist contains the three Karabiner components required by the PRD
 The draw transition is ordered and rollback-safe:
 
 1. confirm that AgentCurtain has Accessibility permission;
-2. snapshot display topology and visible windows on external displays by display UUID;
+2. snapshot display topology and visible windows on all displays by display UUID;
 3. read each active display’s brightness by `displayID` and atomically write mode-0600 recovery files;
 4. start the embedded recovery watchdog;
 5. set each brightness to zero and read it back;
@@ -176,4 +176,4 @@ response. Programmatically injected events cannot prove that HID-layer behavior.
 The full requirement-by-requirement checklist is in
 [docs/PRD-menubar-app.md](docs/PRD-menubar-app.md#9-验收标准).
 
-Brightness default: releasing the curtain (including crash recovery) sets every saved display to 100%, regardless of its pre-curtain brightness.
+Brightness restoration: releasing the curtain (including crash recovery) restores each display’s saved pre-curtain brightness by UUID.

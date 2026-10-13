@@ -5,11 +5,16 @@ public struct DisplayBrightness: Codable, Equatable, Sendable {
     public let displayID: Int
     public let brightness: Double
     public let uuid: String?
+    public let hardwareBrightness: Double?
+    public let softwareBrightness: Double?
 
-    public init(displayID: Int, brightness: Double, uuid: String? = nil) {
+    public init(displayID: Int, brightness: Double, uuid: String? = nil,
+                hardwareBrightness: Double? = nil, softwareBrightness: Double? = nil) {
         self.displayID = displayID
         self.brightness = brightness
         self.uuid = uuid
+        self.hardwareBrightness = hardwareBrightness
+        self.softwareBrightness = softwareBrightness
     }
 }
 

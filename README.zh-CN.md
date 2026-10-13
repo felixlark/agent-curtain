@@ -25,7 +25,7 @@ AgentCurtain 是面向 macOS 26+ 无人值守 GUI agent 会话的菜单栏应用
 - 拒绝优先判定、可自愈的 `kCGHIDEventTap` 阻断器；
 - 每块显示器一个、可在 framebuffer 中扫描到的提示条；
 - 优先用系统显示 SPI 断开/重连外屏，并用 UUID 恢复显示拓扑；
-- 以显示 UUID 记录外屏可见窗口，解除保护后恢复其原显示器和原位置；
+- 以显示 UUID 记录所有屏幕的可见窗口，解除保护后恢复其原显示器和原位置；
 - BetterDisplay 用于亮度和布局，Pro 连接管理仅作系统 SPI 不可用时的回退；
 - `~/.local/state/curtain/control.sock` 上权限为 0600 的 Unix socket；
 - app 被强杀时独立恢复显示拓扑和亮度，再重启 AgentCurtain，由主程序在辅助功能权限下恢复窗口位置的包内看门狗。
@@ -93,8 +93,8 @@ curtain on --allow-any-injected
 
 拒绝名单为空时，`--allow-any-injected` 会被拒绝。全局快捷键：
 
-- `Ctrl+Opt+Cmd+Shift+L`：启用保护；
-- `Ctrl+Opt+Cmd+Shift+U`：解除保护，也可取消正在进行的启用操作。
+- `Ctrl+Opt+Cmd+L`：启用保护；
+- `Ctrl+Opt+Cmd+U`：解除保护，也可取消正在进行的启用操作。
 
 提示条与各屏菜单栏等高、居中显示；刘海屏将状态和快捷键放在刘海两侧，左右对称。
 操作开始立即显示浅色“启用中”或“解除中”。启用完成才变为深红“屏幕关闭·输入锁定”；解除
@@ -119,7 +119,7 @@ curtain on --allow-any-injected
 启用保护的顺序可回滚：
 
 1. 先确认 AgentCurtain 自己已有辅助功能授权，并显示浅色“启用中”；
-2. 按显示 UUID 记录显示拓扑及外屏当前可见窗口的原位置；
+2. 按显示 UUID 记录显示拓扑及所有屏幕当前可见窗口的原位置；
 3. 按 `displayID` 读取所有活动显示器原亮度，并原子写入权限 0600 的恢复记录；
 4. 启动包内独立恢复看门狗；
 5. 逐屏在一次 BetterDisplay 调用中设置亮度为 0 并读回；
@@ -168,4 +168,4 @@ Codex 的 Run 按钮也指向同一脚本。`--verify` 会运行 Swift 测试、
 证据。完整逐项清单见
 [docs/PRD-menubar-app.md](docs/PRD-menubar-app.md#9-验收标准)。
 
-亮度默认值：解除保护（包括崩溃恢复）后，所有已记录屏幕均设为 100%，不再恢复为启用保护前的较低亮度。
+亮度恢复：解除保护（包括崩溃恢复）后，按 UUID 恢复每块屏幕在启用保护前保存的亮度。

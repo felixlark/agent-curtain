@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import CoreGraphics
 
 public struct DisplayTopology: Codable, Equatable, Sendable {
     public let uuid: String
@@ -255,44 +256,99 @@ public enum DisplaySessionOperations {
         try backend.reconnectDisplays(backup: backup)
 
         var failures: [String] = []
+        if backend.kind == .systemSPI {
+            do { try restoreLayoutInOneTransaction(backup, client: client) }
+            catch { failures.append("layout: \(error.localizedDescription)") }
+        } else {
+            if let main = backup.displays.first(where: \.wasMain) {
+                do {
+                    let current = try client.feature("main", uuid: main.uuid).lowercased()
+                    if current != "true" && current != "on" && current != "1" {
+                        try client.setFeature("main", value: "on", uuid: main.uuid)
+                    }
+                } catch {
+                    failures.append("main \(main.uuid): \(error.localizedDescription)")
+                }
+            } else {
+                failures.append(DisplaySessionError.missingMainDisplay.localizedDescription)
+            }
+
+            for saved in backup.displays {
+                do {
+                    if try client.feature("placement", uuid: saved.uuid) != saved.placement {
+                        try client.setFeature("placement", value: saved.placement, uuid: saved.uuid)
+                    }
+                } catch {
+                    failures.append("\(saved.uuid) placement: \(error.localizedDescription)")
+                }
+            }
+        }
         for saved in backup.displays {
             do {
-                if try client.feature("resolution", uuid: saved.uuid) != saved.resolution {
-                    try client.setFeature("resolution", value: saved.resolution, uuid: saved.uuid)
+                if let rotation = saved.rotation {
+                    try client.restoreFeatureAfterSettling("rotation", value: rotation, uuid: saved.uuid)
                 }
-                if let rotation = saved.rotation,
-                   (try? client.feature("rotation", uuid: saved.uuid)) != rotation {
-                    try client.setFeature("rotation", value: rotation, uuid: saved.uuid)
-                }
+                try client.restoreFeatureAfterSettling("resolution", value: saved.resolution, uuid: saved.uuid)
             } catch {
                 failures.append("\(saved.uuid): \(error.localizedDescription)")
             }
         }
 
-        if let main = backup.displays.first(where: \.wasMain) {
-            do {
-                let current = try client.feature("main", uuid: main.uuid).lowercased()
-                if current != "true" && current != "on" && current != "1" {
-                    try client.setFeature("main", value: "on", uuid: main.uuid)
-                }
-            } catch {
-                failures.append("main \(main.uuid): \(error.localizedDescription)")
-            }
-        } else {
-            failures.append(DisplaySessionError.missingMainDisplay.localizedDescription)
-        }
-
-        for saved in backup.displays {
-            do {
-                if try client.feature("placement", uuid: saved.uuid) != saved.placement {
-                    try client.setFeature("placement", value: saved.placement, uuid: saved.uuid)
-                }
-            } catch {
-                failures.append("\(saved.uuid) placement: \(error.localizedDescription)")
-            }
-        }
         if !failures.isEmpty {
             throw BetterDisplayError.commandFailed(failures.joined(separator: "; "))
         }
     }
+
+    /// Main display and all origins share one WindowServer transaction. Per-screen
+    /// placement writes otherwise trigger several screen-change waves and app reflows.
+    private static func restoreLayoutInOneTransaction(_ backup: DisplaySessionBackup, client: BetterDisplayClient) throws {
+        let active = try client.activeDisplays()
+        let ids = Dictionary(uniqueKeysWithValues: active.compactMap { identity in
+            identity.uuid.map { ($0, CGDirectDisplayID(identity.displayID)) }
+        })
+        let changes = try backup.displays.map { saved -> (CGDirectDisplayID, Int32, Int32) in
+            guard let id = ids[saved.uuid], let origin = placementOrigin(saved.placement) else {
+                throw BetterDisplayError.invalidValue("placement \(saved.uuid): \(saved.placement)")
+            }
+            return (id, origin.0, origin.1)
+        }
+        guard changes.contains(where: { id, x, y in
+            let bounds = CGDisplayBounds(id)
+            return bounds.origin.x != Double(x) || bounds.origin.y != Double(y)
+        }) || backup.displays.first(where: \.wasMain).flatMap({ ids[$0.uuid] }) != CGMainDisplayID() else { return }
+        var configuration: CGDisplayConfigRef?
+        let begin = CGBeginDisplayConfiguration(&configuration)
+        guard begin == .success, let configuration else {
+            throw DisplayConnectionBackendError.configuration("layout begin returned \(begin.rawValue)")
+        }
+        var completed = false
+        defer { if !completed { CGCancelDisplayConfiguration(configuration) } }
+        for (id, x, y) in changes {
+            let result = CGConfigureDisplayOrigin(configuration, id, x, y)
+            guard result == .success else {
+                throw DisplayConnectionBackendError.configuration("origin displayID=\(id) returned \(result.rawValue)")
+            }
+        }
+        let result = CGCompleteDisplayConfiguration(configuration, .forSession)
+        guard result == .success else {
+            throw DisplayConnectionBackendError.configuration("layout complete returned \(result.rawValue)")
+        }
+        completed = true
+        // Validate by UUID after committing; a successful transaction alone is not proof.
+        for saved in backup.displays {
+            guard try client.feature("placement", uuid: saved.uuid) == saved.placement else {
+                throw BetterDisplayError.commandFailed("layout readback mismatch for \(saved.uuid)")
+            }
+        }
+        if let main = backup.displays.first(where: \.wasMain) {
+            try client.waitForMainDisplay(uuid: main.uuid)
+        }
+    }
+
+    static func placementOrigin(_ value: String) -> (Int32, Int32)? {
+        let parts = value.split(separator: "x", omittingEmptySubsequences: false)
+        guard parts.count == 2, let x = Int32(parts[0]), let y = Int32(parts[1]) else { return nil }
+        return (x, y)
+    }
+
 }

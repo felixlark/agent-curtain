@@ -157,6 +157,31 @@ private func makeMutedFakeCLI(in root: URL, mute: Int) throws -> URL {
     #expect(launches.urls == [app])   // 拉了一次,且拉的是给定的 app
 }
 
+@Test func betterDisplayClientRecoversWhenTheCLIInitiallyTimesOut() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let counter = root.appendingPathComponent("calls")
+    let cli = root.appendingPathComponent("fake-betterdisplaycli")
+    try """
+    #!/bin/zsh
+    n=$(cat "\(counter.path)" 2>/dev/null || echo 0)
+    n=$((n + 1)); echo $n > "\(counter.path)"
+    if (( n == 1 )); then sleep 1; else echo '{"displayID":"7"}'; fi
+    """.write(to: cli, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+    let app = root.appendingPathComponent("BetterDisplay.app")
+    try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+
+    final class Launches: @unchecked Sendable { var count = 0 }
+    let launches = Launches()
+    let client = try BetterDisplayClient(executable: cli, application: app,
+        launchWait: 2, commandTimeout: 0.1) { _ in launches.count += 1 }
+
+    #expect(try client.displayIDs() == [7])
+    #expect(launches.count == 1)
+}
+
 @Test func betterDisplayClientExplainsWhenTheAppIsNotInstalled() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -170,4 +195,3 @@ private func makeMutedFakeCLI(in root: URL, mute: Int) throws -> URL {
         guard case .appNotRunning = error else { Issue.record("expected appNotRunning, got \(error)"); return }
     }
 }
-

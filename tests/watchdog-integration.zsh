@@ -78,7 +78,7 @@ owner_pid=''
 [[ ! -e "$session" ]]
 [[ ! -e "$window_session" ]]
 grep -Fxq 'set -connectAllDisplays' "$log"
-grep -Fxq 'set get -displayID=7 -brightness=1.0' "$log"
+grep -Fxq 'set get -displayID=7 -brightness=0.75' "$log"
 grep -Fxq -- "-gj $fixture/AgentCurtain.app" "$launch_log"
 
 failure_case="$fixture/launch-failure"

@@ -68,6 +68,7 @@ public struct BetterDisplayClient: Sendable {
     public let application: URL?
     /// 拉起 app 后最多等这么久让 CLI 通起来。
     public let launchWait: TimeInterval
+    public let commandTimeout: TimeInterval
     /// 真正把 app 拉起来的动作。默认 `open -gj`;测试里换成空操作,免得真去开东西。
     public let launcher: @Sendable (URL) -> Void
     private let activeDisplayProvider: @Sendable () throws -> [Int]
@@ -96,12 +97,13 @@ public struct BetterDisplayClient: Sendable {
     }
 
     public init(executable: URL? = nil, application: URL? = URL(fileURLWithPath: "/Applications/BetterDisplay.app"),
-                launchWait: TimeInterval = 10,
+                launchWait: TimeInterval = 10, commandTimeout: TimeInterval = 15,
                 launcher: @escaping @Sendable (URL) -> Void = BetterDisplayClient.defaultLauncher,
                 activeDisplayProvider: @escaping @Sendable () throws -> [Int] = BetterDisplayClient.defaultActiveDisplayProvider,
                 builtinDisplayProvider: @escaping @Sendable (Int) -> Bool = BetterDisplayClient.defaultBuiltinDisplayProvider) throws {
         self.application = application
         self.launchWait = launchWait
+        self.commandTimeout = commandTimeout
         self.launcher = launcher
         self.activeDisplayProvider = activeDisplayProvider
         self.builtinDisplayProvider = builtinDisplayProvider
@@ -124,8 +126,12 @@ public struct BetterDisplayClient: Sendable {
     }
 
     public func displays() throws -> [DisplayIdentity] {
-        var result = try checked(["get", "--identifiers"])
-        if result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let result: CommandResult
+        do {
+            let initial = try checked(["get", "--identifiers"])
+            result = initial.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? try displayIDsAfterLaunchingApp() : initial
+        } catch BetterDisplayError.commandTimedOut {
             result = try displayIDsAfterLaunchingApp()
         }
         let data = Data(result.stdout.utf8)
@@ -185,6 +191,31 @@ public struct BetterDisplayClient: Sendable {
 
     public func setFeature(_ name: String, value: String, uuid: String) throws {
         _ = try checked(["set", "-UUID=\(uuid)", "-\(name)=\(value)"])
+    }
+
+    /// Reconnection exposes displays before BetterDisplay has refreshed their mode.
+    /// Wait for natural restoration before issuing one mode-changing write.
+    public func restoreFeatureAfterSettling(_ name: String, value: String, uuid: String,
+                                            settleTimeout: TimeInterval = 3) throws {
+        func matchesAfterSettling() throws -> Bool {
+            let deadline = Date().addingTimeInterval(settleTimeout)
+            var stable = 0
+            repeat {
+                let actual = try feature(name, uuid: uuid)
+                stable = actual == value ? stable + 1 : 0
+                if stable >= 2 { return true }
+                Thread.sleep(forTimeInterval: 0.2)
+            } while Date() < deadline
+            return false
+        }
+        if try matchesAfterSettling() { return }
+        do { try setFeature(name, value: value, uuid: uuid) }
+        catch {
+            throw BetterDisplayError.commandFailed("\(name)=\(value) for \(uuid): \(error.localizedDescription)")
+        }
+        guard try matchesAfterSettling() else {
+            throw BetterDisplayError.commandFailed("\(name) did not settle at \(value) for \(uuid)")
+        }
     }
 
     public func disconnectAllButMain() throws {
@@ -254,6 +285,23 @@ public struct BetterDisplayClient: Sendable {
         return value
     }
 
+    public func brightnessComponent(_ name: String, displayID: Int) throws -> Double {
+        let result = try checked(["get", "-displayID=\(displayID)", "-\(name)"])
+        guard let value = Double(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)), value.isFinite else {
+            throw BetterDisplayError.invalidBrightness(displayID)
+        }
+        return value
+    }
+
+    public func restoreBrightnessComponent(_ name: String, displayID: Int, value: Double) throws {
+        guard abs(try brightnessComponent(name, displayID: displayID) - value) > 0.01 else { return }
+        let result = try checked(["set", "get", "-displayID=\(displayID)", "-\(name)=\(value)"])
+        guard let readback = Double(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)),
+              readback.isFinite, abs(readback - value) <= 0.01 else {
+            throw BetterDisplayError.commandFailed("displayID=\(displayID) \(name) readback mismatch")
+        }
+    }
+
     public func setBrightness(displayID: Int, value: Double) throws {
         _ = try checked(["set", "-displayID=\(displayID)", "-brightness=\(value)"])
     }
@@ -276,14 +324,18 @@ public struct BetterDisplayClient: Sendable {
         let deadline = Date().addingTimeInterval(launchWait)
         while Date() < deadline {
             usleep(500_000)
-            let retry = try checked(["get", "--identifiers"])
-            if !retry.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return retry }
+            do {
+                let retry = try checked(["get", "--identifiers"])
+                if !retry.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return retry }
+            } catch BetterDisplayError.commandTimedOut {
+                continue
+            }
         }
         throw BetterDisplayError.appNotRunning(application.path)
     }
 
     private func checked(_ arguments: [String]) throws -> CommandResult {
-        let result = try CommandRunner.run(executable, arguments: arguments)
+        let result = try CommandRunner.run(executable, arguments: arguments, timeout: commandTimeout)
         guard result.status == 0 else {
             let message = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             throw BetterDisplayError.commandFailed(message.isEmpty ? "exit \(result.status)" : message)

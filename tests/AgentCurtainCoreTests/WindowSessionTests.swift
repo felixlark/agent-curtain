@@ -2,6 +2,79 @@ import XCTest
 @testable import AgentCurtainCore
 
 final class WindowSessionTests: XCTestCase {
+    func testTransientMetadataUnavailabilityRetriesAndRecovers() throws {
+        var samples = 0
+        var waits = 0
+        let resolved = try WindowApplicationMetadata.resolve(pid: getpid(), capturedAt: Date(),
+            expectedBundleIdentifier: "example.app", application: { () -> String? in
+                samples += 1
+                return samples < 3 ? nil : "example.app"
+            }, bundleIdentifier: { $0 }, wait: { waits += 1 })
+        XCTAssertEqual(resolved, "example.app")
+        XCTAssertEqual(samples, 3)
+        XCTAssertEqual(waits, 2)
+    }
+
+    func testPersistentUnknownMetadataFailsWithoutReportingDisappearance() {
+        var samples = 0
+        XCTAssertThrowsError(try WindowApplicationMetadata.resolve(pid: getpid(), capturedAt: Date(),
+            expectedBundleIdentifier: "example.app", application: { () -> String? in
+                samples += 1
+                return nil
+            }, bundleIdentifier: { $0 }, attempts: 3, wait: {})) { error in
+                XCTAssertTrue(error.localizedDescription.contains("metadata unavailable"))
+            }
+        XCTAssertEqual(samples, 3)
+    }
+
+    func testMetadataRetryRechecksPIDLifetimeAndRejectsIdentityMismatch() throws {
+        let captured = Date()
+        var samples = 0
+        let reused = try WindowApplicationMetadata.resolve(pid: getpid(), capturedAt: captured,
+            expectedBundleIdentifier: "example.app", startTime: {
+                captured.addingTimeInterval(samples == 0 ? -1 : 1)
+            }, application: { () -> String? in samples += 1; return nil },
+            bundleIdentifier: { $0 }, wait: {})
+        XCTAssertNil(reused)
+        XCTAssertEqual(samples, 1)
+        XCTAssertThrowsError(try WindowApplicationMetadata.resolve(pid: getpid(), capturedAt: captured,
+            expectedBundleIdentifier: "example.app", application: { "other.app" },
+            bundleIdentifier: { $0 }, wait: { XCTFail("must not retry a known different identity") }))
+        XCTAssertThrowsError(try WindowApplicationMetadata.resolve(pid: getpid(), capturedAt: captured,
+            expectedBundleIdentifier: "example.app", startTime: { nil }, application: { "example.app" },
+            bundleIdentifier: { $0 }, wait: {}))
+    }
+
+    func testUnknownApplicationDoesNotBlockOtherApplicationTargets() {
+        let first = window()
+        var second = window()
+        // A different identity represents another application's independently recoverable window.
+        second = SavedWindow(ownerPID: 200, bundleIdentifier: "other.app", applicationName: "Other",
+            windowID: 2, identifier: nil, title: "Other", role: first.role, subrole: first.subrole,
+            ordinal: 0, displayUUID: first.displayUUID, frame: first.frame, relativeFrame: first.relativeFrame)
+        let result = WindowApplicationSelection.resolve([first, second]) { saved in
+            if saved.ownerPID == first.ownerPID {
+                throw WindowSessionError.restoreFailures(["metadata unavailable"])
+            }
+            return true
+        }
+        XCTAssertEqual(result.surviving, [second])
+        XCTAssertEqual(result.remaining, [first])
+        XCTAssertEqual(result.disappeared, 0)
+        XCTAssertEqual(result.failures.count, 1)
+    }
+
+    func testSystemMenuBarsAndUnbackedDialogsAreNotDesktopRecoveryTargets() {
+        XCTAssertFalse(WindowSessionPlanner.shouldManageWindow(bundleIdentifier: "com.apple.MenuBarAgent",
+            subrole: "AXDialog", hasScreenWindow: true))
+        XCTAssertFalse(WindowSessionPlanner.shouldManageWindow(bundleIdentifier: "com.openai.codex",
+            subrole: "AXDialog", hasScreenWindow: false))
+        XCTAssertTrue(WindowSessionPlanner.shouldManageWindow(bundleIdentifier: "com.example.app",
+            subrole: "AXDialog", hasScreenWindow: true))
+        XCTAssertTrue(WindowSessionPlanner.shouldManageWindow(bundleIdentifier: "com.google.Chrome",
+            subrole: "AXStandardWindow", hasScreenWindow: false))
+    }
+
     func testBackupStoreRoundTripsAtomicallyWithPrivatePermissions() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("window-session-tests-\(UUID().uuidString)", isDirectory: true)
@@ -86,6 +159,15 @@ final class WindowSessionTests: XCTestCase {
         )
     }
 
+    func testWindowFrameFitsCurrentVisibleAreaWhenDockTakesSpace() {
+        let target = WindowSessionRect(x: 0, y: 30, width: 2048, height: 1122)
+        let visible = WindowSessionRect(x: 0, y: 30, width: 2048, height: 1048)
+        XCTAssertEqual(
+            WindowSessionPlanner.frameFittingVisibleArea(target, in: visible),
+            WindowSessionRect(x: 0, y: 30, width: 2048, height: 1048)
+        )
+    }
+
     func testWindowIDWinsWhenTitlesAndOrderChange() {
         let saved = [
             window(windowID: 10, title: "old A", ordinal: 0),
@@ -147,6 +229,83 @@ final class WindowSessionTests: XCTestCase {
         ]
 
         XCTAssertTrue(WindowSessionPlanner.matches(saved: saved, candidates: candidate).isEmpty)
+    }
+
+    func testRestartCannotMatchByOrdinalEvenWhenWindowCountMatches() {
+        let saved = [window(windowID: 10, title: "old", ordinal: 0)]
+        let candidate = WindowMatchCandidate(windowID: 10, identifier: nil, title: "new",
+            role: "AXWindow", subrole: "AXStandardWindow", ordinal: 0)
+        XCTAssertTrue(WindowSessionPlanner.matches(saved: saved, candidates: [candidate], trustWindowIDs: false).isEmpty)
+    }
+
+    func testCaptureIncludesInternalAndSpanningWindows() {
+        let internalDisplay = WindowDisplayGeometry(uuid: "internal", bounds: .init(x: 0, y: 1440, width: 1512, height: 982), isBuiltin: true)
+        let external = WindowDisplayGeometry(uuid: "external", bounds: .init(x: -2048, y: 568, width: 2048, height: 1152), isBuiltin: false)
+        XCTAssertEqual(WindowSessionPlanner.captureDisplay(for: .init(x: 0, y: 1473, width: 1512, height: 875), displays: [internalDisplay, external])?.uuid, "internal")
+        XCTAssertEqual(WindowSessionPlanner.captureDisplay(for: .init(x: -100, y: 1720, width: 300, height: 300), displays: [internalDisplay, external])?.uuid, "internal")
+        XCTAssertNil(WindowSessionPlanner.captureDisplay(for: .init(x: 9999, y: 9999, width: 30, height: 30), displays: [internalDisplay, external]))
+    }
+
+    func testKernelProcessStartTimeForLiveProcessAndInvalidPID() throws {
+        let captured = Date()
+        let start = try XCTUnwrap(ProcessStartTime.read(pid: getpid()))
+        XCTAssertTrue(WindowSessionPlanner.isOriginalProcess(launchDate: start, capturedAt: captured))
+        XCTAssertFalse(WindowSessionPlanner.isOriginalProcess(launchDate: start, capturedAt: start.addingTimeInterval(-1)))
+        XCTAssertNil(ProcessStartTime.read(pid: -1))
+        XCTAssertNil(ProcessStartTime.read(pid: Int32.max))
+    }
+
+    func testProcessLifetimeRejectsReusedPIDAndUnknownLaunchTime() {
+        let captured = Date(timeIntervalSince1970: 100)
+        XCTAssertTrue(WindowSessionPlanner.isOriginalProcess(launchDate: Date(timeIntervalSince1970: 99), capturedAt: captured))
+        XCTAssertFalse(WindowSessionPlanner.isOriginalProcess(launchDate: Date(timeIntervalSince1970: 101), capturedAt: captured))
+        XCTAssertFalse(WindowSessionPlanner.isOriginalProcess(launchDate: nil, capturedAt: captured))
+    }
+
+    func testNewSessionPreservesFailedAndCorruptRecordsWithoutReplayingThem() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = directory.appendingPathComponent("window-session.json")
+        let claim = directory.appendingPathComponent("window-session.json.restoring.999999")
+        let oldBytes = Data("corrupt legacy record".utf8)
+        try oldBytes.write(to: original)
+        let old = WindowSessionBackup(ownerPID: 1, displays: [], windows: [window()])
+        try WindowSessionBackupStore.write(old, to: claim)
+        let fresh = WindowSessionBackup(ownerPID: 2, displays: [], windows: [])
+        let archive = try XCTUnwrap(WindowSessionBackupStore.beginSession(fresh, at: original))
+        XCTAssertEqual(try Data(contentsOf: archive.appendingPathComponent(original.lastPathComponent)), oldBytes)
+        XCTAssertEqual(try WindowSessionBackupStore.read(from: archive.appendingPathComponent(claim.lastPathComponent)), old)
+        XCTAssertEqual(try WindowSessionBackupStore.read(from: original), fresh)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: claim.path))
+        XCTAssertTrue(RecoveryClaimFiles.recoverable(in: directory, prefix: "window-session.json.restoring.").isEmpty)
+        let mode = try FileManager.default.attributesOfItem(atPath: archive.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(mode?.intValue, 0o700)
+    }
+
+    func testArchiveFailureKeepsOldActiveRecord() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = directory.appendingPathComponent("window-session.json")
+        let old = WindowSessionBackup(ownerPID: 1, displays: [], windows: [])
+        try WindowSessionBackupStore.write(old, to: original)
+        try Data().write(to: directory.appendingPathComponent("window-history"))
+        XCTAssertThrowsError(try WindowSessionBackupStore.beginSession(
+            WindowSessionBackup(ownerPID: 2, displays: [], windows: []), at: original))
+        XCTAssertEqual(try WindowSessionBackupStore.read(from: original), old)
+    }
+
+    func testNewSessionRefusesLiveRecoveryClaim() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let claim = directory.appendingPathComponent("window-session.json.restoring.1")
+        try Data().write(to: claim)
+        XCTAssertThrowsError(try WindowSessionBackupStore.beginSession(
+            WindowSessionBackup(ownerPID: 2, displays: [], windows: []),
+            at: directory.appendingPathComponent("window-session.json")))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: claim.path))
     }
 
     private func display(uuid: String, x: Double, y: Double, width: Double, height: Double) -> WindowDisplayGeometry {

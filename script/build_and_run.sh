@@ -4,7 +4,7 @@ set -euo pipefail
 MODE="${1:-run}"
 APP_NAME="AgentCurtain"
 BUNDLE_ID="com.longbiaochen.AgentCurtain"
-APP_VERSION="1.1.0"
+APP_VERSION="1.1.3"
 SIGNING_IDENTITY="${CURTAIN_SIGNING_IDENTITY:-Developer ID Application: LONGBIAO CHEN (HJG65XBC25)}"
 MIN_SYSTEM_VERSION="26.0"
 BUILD_CONFIGURATION="${CURTAIN_BUILD_CONFIGURATION:-release}"
@@ -22,9 +22,9 @@ INSTALLED_APP="/Applications/$APP_NAME.app"
 SOCKET_PATH="$HOME/.local/state/curtain/control.sock"
 
 case "$MODE" in
-  run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify|--install|install) ;;
+  --build-only|run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify|--install|install) ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--install]" >&2
+    echo "usage: $0 [--build-only|run|--debug|--logs|--telemetry|--verify|--install]" >&2
     exit 2
     ;;
 esac
@@ -185,11 +185,12 @@ install_artifacts() {
   echo "preserved existing login-item registrations"
 }
 
-stop_running_app
+if [[ "$MODE" != "--build-only" ]]; then stop_running_app; fi
 stage_bundle
 sign_bundle
 
 case "$MODE" in
+  --build-only) ;;
   run)
     launch_and_wait "$APP_BUNDLE"
     ;;
@@ -209,6 +210,7 @@ case "$MODE" in
     "$ROOT_DIR/tests/banner-lifetime.zsh"
     zsh "$ROOT_DIR/tests/banner-layout.zsh"
     zsh "$ROOT_DIR/tests/coordinator-transitions.zsh"
+    zsh "$ROOT_DIR/tests/window-session-recovery.zsh"
     CURTAIN_SWIFTPM_SCRATCH_PATH="$SWIFTPM_SCRATCH_PATH" "$ROOT_DIR/tests/watchdog-integration.zsh"
     swiftc -typecheck -parse-as-library "$ROOT_DIR/script/verify_banner_framebuffer.swift" \
       -framework CoreGraphics \

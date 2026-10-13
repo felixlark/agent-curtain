@@ -15,6 +15,9 @@ elif [[ "$*" == 'get -UUID=fixture-seven -rotation' ]]; then
   print -r -- '0'
 elif [[ "$*" == 'get -UUID=fixture-seven -connected' ]]; then
   print -r -- 'on'
-elif [[ "$*" == 'set get -displayID=7 -brightness=1.0' ]]; then
-  print -r -- '1.0'
+elif [[ "$*" == 'set get -displayID=7 -brightness=0.75' ]]; then
+  print -r -- '0.75' > "$CURTAIN_FAKE_BETTERDISPLAY_STATE"
+  print -r -- '0.75'
+elif [[ "$*" == 'get -displayID=7 -brightness' ]]; then
+  cat "$CURTAIN_FAKE_BETTERDISPLAY_STATE"
 fi

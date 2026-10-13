@@ -16,8 +16,8 @@ final class BannerController {
 
         var detail: String {
             switch self {
-            case .enabling: return "⌃⌥⌘⇧U 取消"
-            case .protected: return "⌃⌥⌘⇧U 解除"
+            case .enabling: return "⌃⌥⌘U 取消"
+            case .protected: return "⌃⌥⌘U 解除"
             case .disabling: return "恢复屏幕…"
             case .released: return "可正常操作"
             case .failed: return "请查看菜单"

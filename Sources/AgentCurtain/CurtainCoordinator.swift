@@ -30,6 +30,7 @@ final class CurtainCoordinator {
     private(set) var displayCount = 0
     private(set) var activeDisplayCount = 0
     private(set) var lastError: String?
+    var recoveryWarning: String? { windowSession.recoveryWarning }
     var onChange: (() -> Void)?
 
     init(paths: CurtainPaths) {
@@ -259,7 +260,6 @@ final class CurtainCoordinator {
 
     private func restoreProtectionStateLocked() -> (error: Error?, activeDisplayCount: Int?) {
         var messages: [String] = []
-        let pendingExternalDisplays = displaySession.pendingRestoreCount
         var displaysRestored = true
         do { try displaySession.restoreAllDisplays() }
         catch {
@@ -272,10 +272,10 @@ final class CurtainCoordinator {
             do { _ = try windowSession.restoreAllWindows() }
             catch { messages.append("window restore: \(error.localizedDescription)") }
         }
-        return (
-            messages.isEmpty ? nil : CurtainRecoveryError(messages: messages),
-            pendingExternalDisplays > 0 ? pendingExternalDisplays + 1 : nil
-        )
+        var activeCount: Int?
+        do { activeCount = try displaySession.currentActiveDisplayCount() }
+        catch { messages.append("active displays: \(error.localizedDescription)") }
+        return (messages.isEmpty ? nil : CurtainRecoveryError(messages: messages), activeCount)
     }
 
     private func finishOpening(
@@ -287,12 +287,10 @@ final class CurtainCoordinator {
         phase = .open
         since = nil
         displayCount = 0
-        if restoreError == nil {
-            if let restoredActiveDisplayCount {
-                activeDisplayCount = restoredActiveDisplayCount
-            } else if restoredDisplayCount > 0 {
-                activeDisplayCount = restoredDisplayCount
-            }
+        if let restoredActiveDisplayCount {
+            activeDisplayCount = restoredActiveDisplayCount
+        } else if restoreError == nil && restoredDisplayCount > 0 {
+            activeDisplayCount = restoredDisplayCount
         }
         drawCancellation = nil
         let errors = [operationError?.localizedDescription, restoreError?.localizedDescription].compactMap { $0 }
@@ -352,6 +350,7 @@ final class CurtainCoordinator {
             allowed: counters.allowed,
             denied: counters.deniedPIDs,
             since: since.map { ISO8601DateFormatter().string(from: $0) },
+            warning: recoveryWarning,
             error: ok ? nil : lastError
         )
     }

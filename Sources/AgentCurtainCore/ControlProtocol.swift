@@ -75,6 +75,7 @@ public struct ControlResponse: Codable, Equatable, Sendable {
     public var allowed: UInt64?
     public var denied: Int?
     public var since: String?
+    public var warning: String?
     public var error: String?
 
     public init(
@@ -94,6 +95,7 @@ public struct ControlResponse: Codable, Equatable, Sendable {
         allowed: UInt64? = nil,
         denied: Int? = nil,
         since: String? = nil,
+        warning: String? = nil,
         error: String? = nil
     ) {
         self.ok = ok
@@ -112,6 +114,7 @@ public struct ControlResponse: Codable, Equatable, Sendable {
         self.allowed = allowed
         self.denied = denied
         self.since = since
+        self.warning = warning
         self.error = error
     }
 

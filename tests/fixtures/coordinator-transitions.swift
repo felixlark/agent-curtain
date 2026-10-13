@@ -40,6 +40,7 @@ final class Scenario {
     let restore = Gate()
     var blockerFails = false
     var restoreFails = false
+    var windowRestoreFails = false
     var prepared = false
     var startupDisplayFails = false
     var startupBrightnessFails = false
@@ -133,11 +134,13 @@ final class DisplaySessionController {
 final class WindowSessionController {
     let scenario: Scenario
     init(paths: CurtainPaths) { scenario = Scenario.current! }
+    var recoveryWarning: String?
     var lastCapturedCount = 0
     var lastRestoredCount = 0
     func capture() throws -> Int { 3 }
     func restoreAllWindows() throws -> WindowRestorationReport? {
         if !scenario.prepared { scenario.startupWindowCalls += 1 }
+        if scenario.windowRestoreFails { throw FixtureFailure(message: "window restoration refused") }
         return nil
     }
     func recoverStaleBackup() throws {}
@@ -308,8 +311,34 @@ func openingCancelsPendingScreenReconciliation() throws {
     }
 }
 
+func windowFailureDoesNotLeaveStaleDisplayCountOrBlockNextDraw() throws {
+    try runScenario("window recovery isolation") { coordinator, scenario in
+        var drawn: ControlResponse?
+        coordinator.draw { drawn = $0 }
+        try scenario.dim.awaitEntry("first draw")
+        scenario.dim.release.signal()
+        try pump(until: { drawn != nil }, "first draw done")
+        try require(coordinator.activeDisplayCount == 1, "drawn topology")
+        scenario.windowRestoreFails = true
+        var opened: ControlResponse?
+        coordinator.open { opened = $0 }
+        try scenario.restore.awaitEntry("release with failed window recovery")
+        scenario.restore.release.signal()
+        try pump(until: { opened != nil }, "failed window recovery done")
+        try require(opened?.ok == false, "window failure remains visible")
+        try require(opened?.activeDisplays == 4, "actual display count survives window error")
+        drawn = nil
+        coordinator.draw { drawn = $0 }
+        try scenario.dim.awaitEntry("next draw")
+        scenario.dim.release.signal()
+        try pump(until: { drawn != nil }, "next draw done")
+        try require(drawn?.ok == true && coordinator.phase == .drawn, "window failure cannot poison protection")
+    }
+}
+
 precondition(Thread.isMainThread)
 let cases: [(String, () throws -> Void)] = [
+    ("window error preserves actual display count and allows next draw", windowFailureDoesNotLeaveStaleDisplayCountOrBlockNextDraw),
     ("startup display failure still restores brightness", startupRecoveryContinuesAfterDisplayFailure),
     ("startup brightness failure still restores windows", startupRecoveryContinuesAfterBrightnessFailure),
     ("normal enabling/protected/disabling/released order", normalTransitions),

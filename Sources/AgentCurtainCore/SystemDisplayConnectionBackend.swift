@@ -107,38 +107,21 @@ public struct SystemDisplayConnectionBackend: DisplayConnectionBackend {
             let missing = backup.displays.filter { !active.contains($0.displayID) }
             try configure(missing.map { ($0, true) })
             let expected = Set(backup.displays.map(\.displayID))
+            // Display links can take several seconds to train. Reissuing enable while
+            // that first transaction is in flight restarts modesets and visibly flickers.
             do {
-                try waitForActiveDisplayIDs(expected, exact: false, timeout: 2)
+                try waitForActiveDisplayIDs(expected, exact: false, timeout: 12)
             } catch {
-                do {
-                    try retryMissingDisplaysIndividually(backup: backup, expected: expected, timeout: 12)
-                } catch {
-                    let identities = try client.displays()
-                    let currentIDs = Dictionary(uniqueKeysWithValues: identities.compactMap { identity in
-                        identity.uuid.map { ($0, identity.displayID) }
-                    })
-                    let remapped = backup.displays.compactMap { saved -> DisplayTopology? in
-                        guard let current = currentIDs[saved.uuid], current != saved.displayID else { return nil }
-                        return DisplayTopology(
-                            uuid: saved.uuid,
-                            displayID: current,
-                            isBuiltin: saved.isBuiltin,
-                            wasMain: saved.wasMain,
-                            placement: saved.placement,
-                            resolution: saved.resolution,
-                            rotation: saved.rotation
-                        )
-                    }
-                    let nowActive = Set(try activeDisplayIDs())
-                    let stillMissing = remapped.filter { !nowActive.contains($0.displayID) }
-                    for display in stillMissing {
-                        try configure([(display, true)])
-                        usleep(250_000)
-                    }
-                    _ = try client.waitForActiveDisplays(
-                        uuids: Set(backup.displays.map(\.uuid)), exact: false
-                    )
-                }
+                let refreshed = DisplaySessionOperations.refreshDisplayIDs(
+                    in: backup, identities: try client.displays()
+                )
+                let nowActive = Set(try activeDisplayIDs())
+                let stillMissing = refreshed.displays.filter { !nowActive.contains($0.displayID) }
+                // One bounded recovery transaction, after a full settle interval.
+                try configure(stillMissing.map { ($0, true) })
+                _ = try client.waitForActiveDisplays(
+                    uuids: Set(backup.displays.map(\.uuid)), exact: false
+                )
             }
         } catch {
             if (try? client.proAvailable()) == true {
@@ -175,28 +158,6 @@ public struct SystemDisplayConnectionBackend: DisplayConnectionBackend {
             throw DisplayConnectionBackendError.configuration("complete returned \(complete.rawValue)")
         }
         completed = true
-    }
-
-    private func retryMissingDisplaysIndividually(
-        backup: DisplaySessionBackup,
-        expected: Set<Int>,
-        timeout: TimeInterval
-    ) throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        var actual: Set<Int> = []
-        repeat {
-            actual = Set(try activeDisplayIDs())
-            if expected.isSubset(of: actual) { return }
-            for display in backup.displays where !actual.contains(display.displayID) {
-                try configure([(display, true)])
-                usleep(250_000)
-                actual = Set(try activeDisplayIDs())
-                if expected.isSubset(of: actual) { return }
-            }
-        } while Date() < deadline
-        throw DisplayConnectionBackendError.verification(
-            expected: expected.sorted(), actual: actual.sorted()
-        )
     }
 
     private func waitForActiveDisplayIDs(

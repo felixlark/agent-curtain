@@ -35,12 +35,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let summary = NSMenuItem(title: coordinator.statusSummary, action: nil, keyEquivalent: "")
         summary.isEnabled = false
         menu.addItem(summary)
+        if let warning = coordinator.recoveryWarning {
+            let notice = NSMenuItem(title: warning, action: nil, keyEquivalent: "")
+            notice.isEnabled = false
+            menu.addItem(notice)
+        }
         menu.addItem(.separator())
 
         switch coordinator.phase {
         case .open:
             if coordinator.lastError != nil {
-                menu.addItem(item("重试恢复显示器", action: #selector(openCurtain), key: "u"))
+                menu.addItem(item("重试恢复屏幕与窗口", action: #selector(openCurtain), key: "u"))
             }
             menu.addItem(item("启用保护", action: #selector(drawCurtain), key: "l"))
         case .drawn:
@@ -83,7 +88,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func item(_ title: String, action: Selector, key: String = "") -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
-        if !key.isEmpty { item.keyEquivalentModifierMask = [.control, .option, .command, .shift] }
+        if !key.isEmpty { item.keyEquivalentModifierMask = [.control, .option, .command] }
         return item
     }
 }

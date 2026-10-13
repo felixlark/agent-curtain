@@ -37,11 +37,46 @@ import Testing
         }
     }
 
+    @Test func brightnessComponentsSurviveBackupAndDisplayIDRemap() throws {
+        let saved = DisplayBrightness(displayID: 8, brightness: 0.6, uuid: "changed",
+            hardwareBrightness: 0.75, softwareBrightness: 0.8)
+        let encoded = try JSONEncoder().encode(saved)
+        #expect(try JSONDecoder().decode(DisplayBrightness.self, from: encoded) == saved)
+        let plan = try BrightnessRestoration.reconciliationPlan(existing: [saved],
+            active: [DisplayIdentity(displayID: 18, uuid: "changed")], currentBrightness: { _ in 0 })
+        #expect(plan.updated.first?.hardwareBrightness == 0.75)
+        #expect(plan.updated.first?.softwareBrightness == 0.8)
+    }
+
     @Test func oldBackupRemainsReadable() throws {
         let data = Data(#"{"displayID":3,"brightness":0.8}"#.utf8)
         let saved = try JSONDecoder().decode(DisplayBrightness.self, from: data)
         #expect(saved.uuid == nil)
         #expect(try BrightnessRestoration.target(for: saved, active: [DisplayIdentity(displayID: 3, uuid: "dell")]) == 3)
+    }
+
+    @Test func rejectsAggregateBrightnessChangedByComponentWrite() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cli = root.appendingPathComponent("cli")
+        try #"""
+        #!/bin/sh
+        case "$*" in
+          *--identifiers*) echo '[{"displayID":5,"UUID":"dell"}]' ;;
+          *-hardwareBrightness=*) touch "${0%/*}/changed"; echo 0.75 ;;
+          *-hardwareBrightness*) echo 0.2 ;;
+          *-brightness=*) echo 0.6 ;;
+          *) if [ -f "${0%/*}/changed" ]; then echo 0.75; else echo 0.6; fi ;;
+        esac
+        """#.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: cli.path)
+        let client = try BetterDisplayClient(executable: cli, application: nil)
+        #expect(throws: (any Error).self) {
+            try BrightnessRestoration.restore(BrightnessBackup(ownerPID: 1, displays: [
+                DisplayBrightness(displayID: 5, brightness: 0.6, uuid: "dell", hardwareBrightness: 0.75)
+            ]), client: client)
+        }
     }
 
     @Test func continuesAfterMissingDisplayAndRejectsFalseSuccess() throws {
@@ -66,10 +101,10 @@ import Testing
             DisplayBrightness(displayID: 4, brightness: 1, uuid: "mi")])
         #expect(throws: (any Error).self) { try BrightnessRestoration.restore(backup, client: client) }
         let calls = try String(contentsOf: root.appendingPathComponent("calls"), encoding: .utf8)
-        #expect(calls.contains("-displayID=5 -brightness=1.0"))
+        #expect(calls.contains("-displayID=5 -brightness=0.8"))
         #expect(calls.contains("-displayID=4 -brightness=1.0"))
-        // Full brightness is the saved default even when the pre-curtain value was lower.
-        let script = try String(contentsOf: cli, encoding: .utf8).replacingOccurrences(of: "echo 0.15", with: "echo 1.0")
+        // A successful restore must reproduce the saved non-default value.
+        let script = try String(contentsOf: cli, encoding: .utf8).replacingOccurrences(of: "echo 0.15", with: "echo 0.2")
         try script.write(to: cli, atomically: false, encoding: .utf8)
         try BrightnessRestoration.restore(BrightnessBackup(ownerPID: 1, displays: [
             DisplayBrightness(displayID: 3, brightness: 0.2, uuid: "dell")]), client: client)

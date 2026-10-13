@@ -123,7 +123,7 @@ final class InputBlocker {
 
     static func hasAllCurtainModifiers(_ flags: CGEventFlags) -> Bool {
         flags.contains(.maskControl) && flags.contains(.maskAlternate)
-            && flags.contains(.maskCommand) && flags.contains(.maskShift)
+            && flags.contains(.maskCommand)
     }
 
     private static let blockedEventTypes: [CGEventType] = [
