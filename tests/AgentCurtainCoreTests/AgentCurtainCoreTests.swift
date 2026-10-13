@@ -217,10 +217,10 @@ private func makeMutedFakeCLI(in root: URL, mute: Int) throws -> URL {
     let counter = root.appendingPathComponent("calls")
     let cli = root.appendingPathComponent("fake-betterdisplaycli")
     try """
-    #!/bin/zsh
+    #!/bin/sh
     n=$(cat "\(counter.path)" 2>/dev/null || echo 0)
     n=$((n + 1)); echo $n > "\(counter.path)"
-    if (( n == 1 )); then sleep 1; else echo '{"displayID":"7"}'; fi
+    if [ "$n" -eq 1 ]; then sleep 2; else echo '{"displayID":"7"}'; fi
     """.write(to: cli, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
     let app = root.appendingPathComponent("BetterDisplay.app")
@@ -228,8 +228,9 @@ private func makeMutedFakeCLI(in root: URL, mute: Int) throws -> URL {
 
     final class Launches: @unchecked Sendable { var count = 0 }
     let launches = Launches()
+    // Keep the forced timeout well above process-launch noise under a full-suite load.
     let client = try BetterDisplayClient(executable: cli, application: app,
-        launchWait: 2, commandTimeout: 0.1) { _ in launches.count += 1 }
+        launchWait: 5, commandTimeout: 0.5) { _ in launches.count += 1 }
 
     #expect(try client.displayIDs() == [7])
     #expect(launches.count == 1)
