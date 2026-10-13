@@ -6,6 +6,11 @@
 
 ## 当前基线与本轮证据
 
+- 系统入口：[AgentCurtain 正式安装版](/Applications/AgentCurtain.app)。本项目是
+  sol 本机菜单栏应用，没有 Web 页面；打开 app 后点击菜单栏眼睛图标，已运行
+  时直接点击。无需产品账号登录；远程先用已有 UU 会话连接 sol。按追加请求
+  `d00ce1d0-5c59-4db9-999f-5dcd96e73584`，回执优先给该入口，不录屏；
+  下述截图为追加指示前已取得的辅助记录，保留原证据。
 - sol 的 canonical checkout：`0b3fefc5548038e8cd53e6064462aeb225dc9103`，
   已与远端 `origin/main` 读回一致，包含 v1.1.1–v1.1.3 修复。
 - 正式安装路径 `/Applications/AgentCurtain.app`，版本 1.1.3；主程序 SHA256：
