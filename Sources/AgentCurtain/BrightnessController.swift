@@ -108,7 +108,9 @@ final class BrightnessController {
         }
         let client = try BetterDisplayClient()
         let existing = try BrightnessBackupStore.read(from: original)
-        let active = try client.displays()
+        // Disconnected saved displays remain in BetterDisplay's inventory but
+        // cannot accept brightness queries. Reconcile only live display links.
+        let active = try client.activeDisplays()
         let plan = try BrightnessRestoration.reconciliationPlan(
             existing: existing.displays,
             active: active,

@@ -4,6 +4,27 @@ import Testing
 @testable import AgentCurtainCore
 
 @Suite(.serialized) struct DisplaySessionTests {
+    @Test func internalOnlyBrightnessReconciliationDoesNotQueryDisconnectedInventory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cli = root.appendingPathComponent("cli")
+        try #"""
+        #!/bin/sh
+        echo '[{"displayID":1,"UUID":"internal"},{"displayID":2,"UUID":"external"}]'
+        """#.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: cli.path)
+        let client = try BetterDisplayClient(executable: cli, application: nil,
+            activeDisplayProvider: { [1] }, builtinDisplayProvider: { $0 == 1 })
+        let existing = [DisplayBrightness(displayID: 1, brightness: 1, uuid: "internal"),
+                        DisplayBrightness(displayID: 2, brightness: 1, uuid: "external")]
+        var queried: [Int] = []
+        let plan = try BrightnessRestoration.reconciliationPlan(existing: existing,
+            active: client.activeDisplays(), currentBrightness: { id in queried.append(id); return 0 })
+        #expect(queried == [1])
+        #expect(plan.updated == existing && plan.toDim.isEmpty)
+    }
+
     @Test func layoutIgnoresDuplicateTransientUnknownUUIDsAndRejectsAmbiguousSavedIdentities() throws {
         let active = [
             DisplayIdentity(displayID: 1, uuid: "internal", isBuiltin: true),
