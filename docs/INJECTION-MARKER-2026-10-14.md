@@ -28,7 +28,7 @@
 
 ```sh
 curtain off
-curtain on 30 --allow-marker
+curtain on 30 --allow-marker >/dev/null
 ```
 
 已 drawn 时重复 `on` 保留当前会话；切换档位需先 `off`。`on --allow-marker 30` 同样支持。
@@ -72,7 +72,7 @@ event.post(tap: .cghidEventTap)
 | 不带暗号输入 `BLOCKED` | 文稿仍为 `MARKER_OKFINAL_OK` | blocked 3 → 17 |
 | 不带暗号的 ⌃⌥⌘U HID 热键 | drawn → opening → open；暗号与 expectation 均删除 | 四屏恢复，22 窗口恢复，两个恢复队列均为 0 |
 
-热键验收由授权的事件注入测试程序向 HID 流生成该组合，实际触发安装版解锁；没有声称由用户手按键盘。横幅的运行窗口标题读回为 `AgentCurtain · 屏幕关闭·仅放行注入`，菜单/横幅文案与不截断布局另有转场和布局测试。未把无法绑定窗口的菜单栏 App 的 CUA timeout 当作产品失败或界面验收通过。
+热键验收由授权的事件注入测试程序向 HID 流生成该组合，实际触发安装版解锁；没有声称由用户手按键盘。保护状态下成功绑定正式安装版横幅，官方 CUA AX 读回 `屏幕关闭·仅放行注入 ⌃⌥⌘U 解除`；原始图像显示左右红色翼区完整文案，普通档另读回 `屏幕关闭·输入锁定`。菜单/横幅文案与不截断布局另有转场和布局测试。open 状态没有横幅窗口时，菜单栏 App 的 CUA 绑定 timeout 不作为产品失败或验收通过证据。
 
 官方 Computer Use 原始图片在本执行回执中；摘录：[cua-observations.txt](/Users/longbiao/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/cua-observations.txt)。实际保存并关闭的文稿：[AgentCurtain-marker-test.rtf](/Users/longbiao/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/AgentCurtain-marker-test.rtf)。对应 `accepted-*.json` 保留逐步状态与计数，暗号字段均脱敏。
 
@@ -94,3 +94,5 @@ event.post(tap: .cghidEventTap)
 `injectionMarker` 字段不存在，暗号文件不存在；expectation 存在。drawn 期间的 3 个外屏和 21 个窗口为解锁恢复快照；已证明解锁后恢复队列变为 0。实际安装版及其 watchdog 继续运行，sentry launchd 作业保留，最近退出码为 0。
 
 未读取 `smart-shadow.json` 或微信凭据，未操作微信，未调用 Computer Use 操作 Codex 桌面，未使用 codex-dispatch、广泛注入放行开关、force-push 或权限绕过。无密码/认证挑战待处理。代码和实测验收项已执行；Grok 的最终成果验收仍由 Grok 负责。
+
+代码和报告已按既有发布授权推送到 `origin/main`。该分支没有 GitHub Actions 工作流文件，`gh run list --branch main --limit 3` 返回空数组；没有现存 CI 运行待跟进。
