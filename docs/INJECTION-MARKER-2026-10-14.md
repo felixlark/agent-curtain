@@ -24,7 +24,7 @@
 原型 tap 消费自己的测试事件，避免桌面副作用；已有 `listenAccess`、`postAccess`、`AXTrusted` 均为 true，无权限写入。
 源码与原始回执：[prototype.swift](/Users/longbiao/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/prototype.swift)、[prototype-full.log](/Users/longbiao/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/prototype-full.log)。
 
-## 礼部注入方式
+## 外部 agent 注入方式
 
 ```sh
 curtain off
