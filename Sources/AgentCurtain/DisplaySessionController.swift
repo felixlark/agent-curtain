@@ -13,6 +13,10 @@ final class DisplaySessionController {
 
     func capture() throws -> Int {
         try paths.prepareDirectories()
+        // A snapshot left by an interrupted session is recoverable state, not a
+        // reason to refuse a new draw. Recover it first, exactly as startup does;
+        // if it is still unrecoverable the explicit failure below is kept.
+        if hasBackup { try restoreAllDisplays() }
         guard !hasBackup else { throw DisplaySessionControllerError.unrestoredBackup }
         let client = try BetterDisplayClient()
         let backend = try DisplayConnectionBackendFactory.select(client: client)
@@ -128,8 +132,20 @@ final class DisplaySessionController {
     }
 
     var pendingRestoreCount: Int {
-        guard let backup = try? DisplaySessionBackupStore.read(from: paths.displaySessionBackup) else { return 0 }
-        return backup.displays.filter { !$0.isBuiltin }.count
+        if let active = try? DisplaySessionBackupStore.read(from: paths.displaySessionBackup) {
+            return active.displays.filter { !$0.isBuiltin }.count
+        }
+        // A failed relinquish can leave the snapshot only as an in-flight claim;
+        // report it rather than claiming nothing is pending.
+        for claim in RecoveryClaimFiles.recoverable(
+            in: paths.stateDirectory,
+            prefix: "display-session.json.restoring."
+        ) {
+            if let claimed = try? DisplaySessionBackupStore.read(from: claim) {
+                return claimed.displays.filter { !$0.isBuiltin }.count
+            }
+        }
+        return 0
     }
 
     var privateDisplaySPIStatus: String {
@@ -145,9 +161,11 @@ final class DisplaySessionController {
     }
 
     private var hasBackup: Bool {
-        if FileManager.default.fileExists(atPath: paths.displaySessionBackup.path) { return true }
-        let contents = (try? FileManager.default.contentsOfDirectory(atPath: paths.stateDirectory.path)) ?? []
-        return contents.contains(where: { $0.hasPrefix("display-session.json.restoring.") })
+        RecoveryClaimFiles.hasPendingSnapshot(
+            active: paths.displaySessionBackup,
+            claimPrefix: "display-session.json.restoring.",
+            in: paths.stateDirectory
+        )
     }
 }
 

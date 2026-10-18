@@ -111,14 +111,28 @@ final class WindowSessionController {
     }
 
     var pendingRestoreCount: Int {
-        guard let backup = try? WindowSessionBackupStore.read(from: paths.windowSessionBackup) else { return 0 }
-        return backup.windows.count
+        if let active = try? WindowSessionBackupStore.read(from: paths.windowSessionBackup) {
+            return active.windows.count
+        }
+        // A failed relinquish can leave the snapshot only as an in-flight claim;
+        // report it rather than claiming nothing is pending.
+        for claim in RecoveryClaimFiles.recoverable(
+            in: paths.stateDirectory,
+            prefix: "window-session.json.restoring."
+        ) {
+            if let claimed = try? WindowSessionBackupStore.read(from: claim) {
+                return claimed.windows.count
+            }
+        }
+        return 0
     }
 
     private var hasBackup: Bool {
-        if FileManager.default.fileExists(atPath: paths.windowSessionBackup.path) { return true }
-        let contents = (try? FileManager.default.contentsOfDirectory(atPath: paths.stateDirectory.path)) ?? []
-        return contents.contains(where: { $0.hasPrefix("window-session.json.restoring.") })
+        RecoveryClaimFiles.hasPendingSnapshot(
+            active: paths.windowSessionBackup,
+            claimPrefix: "window-session.json.restoring.",
+            in: paths.stateDirectory
+        )
     }
 }
 

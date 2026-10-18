@@ -45,6 +45,30 @@ final class WindowSessionTests: XCTestCase {
             bundleIdentifier: { $0 }, wait: {}))
     }
 
+    func testMissingDisplayStrandsOnlyItsWindowsAndKeepsTheRest() {
+        let present = window()
+        let onMissingDisplay = SavedWindow(ownerPID: 100, bundleIdentifier: "example.app",
+            applicationName: "Example", windowID: 2, identifier: nil, title: "On missing display",
+            role: present.role, subrole: present.subrole, ordinal: 1, displayUUID: "gone",
+            frame: present.frame, relativeFrame: present.relativeFrame)
+        let partition = WindowSessionPlanner.partitionRestoreTargets(
+            [present, onMissingDisplay], availableUUIDs: ["external"])
+        XCTAssertEqual(partition.restorable, [present])
+        XCTAssertEqual(partition.stranded, [onMissingDisplay])
+    }
+
+    func testTransientProcessStartTimeReadIsRetriedWithinTheBound() throws {
+        let captured = Date()
+        var reads = 0
+        let resolved = try WindowApplicationMetadata.resolve(pid: getpid(), capturedAt: captured,
+            expectedBundleIdentifier: "example.app",
+            startTime: { reads += 1; return reads == 1 ? nil : captured.addingTimeInterval(-1) },
+            application: { () -> String? in "example.app" },
+            bundleIdentifier: { $0 }, attempts: 2, wait: {})
+        XCTAssertEqual(resolved, "example.app")
+        XCTAssertEqual(reads, 2)
+    }
+
     func testUnknownApplicationDoesNotBlockOtherApplicationTargets() {
         let first = window()
         var second = window()

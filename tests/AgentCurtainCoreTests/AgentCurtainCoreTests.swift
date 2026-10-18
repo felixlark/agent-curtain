@@ -58,6 +58,34 @@ import Testing
     #expect(try JSONDecoder().decode(ControlResponse.self, from: legacy).injectionMarker == nil)
 }
 
+@Test func pendingSnapshotCountsActiveFileAndAnyClaim() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("curtain-pending-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let active = directory.appendingPathComponent("display-session.json")
+    let prefix = "display-session.json.restoring."
+    func pending() -> Bool {
+        RecoveryClaimFiles.hasPendingSnapshot(active: active, claimPrefix: prefix, in: directory)
+    }
+
+    #expect(!pending())
+    try Data().write(to: active)
+    #expect(pending())
+    try FileManager.default.removeItem(at: active)
+    #expect(!pending())
+    // A claim from this process and a dead one both count as pending state.
+    try Data().write(to: directory.appendingPathComponent("\(prefix)\(getpid())"))
+    #expect(pending())
+    try FileManager.default.removeItem(at: directory.appendingPathComponent("\(prefix)\(getpid())"))
+    try Data().write(to: directory.appendingPathComponent("\(prefix)999999"))
+    #expect(pending())
+    // Unrelated names never count.
+    try FileManager.default.removeItem(at: directory.appendingPathComponent("\(prefix)999999"))
+    try Data().write(to: directory.appendingPathComponent("brightness.json.restoring.999999"))
+    #expect(!pending())
+}
+
 @Test func markerStoreWritesSecureFileAndClearsIdempotently() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

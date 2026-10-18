@@ -13,6 +13,9 @@ final class BrightnessController {
 
     func dimAllDisplays(displaySessionBackup: URL, isCancelled: () -> Bool = { false }) throws -> Int {
         try paths.prepareDirectories()
+        // A brightness snapshot left by an interrupted session is recoverable state,
+        // not a reason to refuse a new draw. Recover it first, then re-check.
+        if hasPendingBrightnessSnapshot { try restoreAllDisplays() }
         guard !FileManager.default.fileExists(atPath: paths.brightnessBackup.path) else {
             throw BrightnessControllerError.unrestoredBackup
         }
@@ -130,13 +133,16 @@ final class BrightnessController {
     }
 
     func recoverStaleBackup() throws {
-        guard FileManager.default.fileExists(atPath: paths.brightnessBackup.path) || hasOrphanedClaim else { return }
+        guard hasPendingBrightnessSnapshot else { return }
         try restoreAllDisplays()
     }
 
-    private var hasOrphanedClaim: Bool {
-        let contents = (try? FileManager.default.contentsOfDirectory(atPath: paths.stateDirectory.path)) ?? []
-        return contents.contains(where: { $0.hasPrefix("brightness.json.restoring.") })
+    private var hasPendingBrightnessSnapshot: Bool {
+        RecoveryClaimFiles.hasPendingSnapshot(
+            active: paths.brightnessBackup,
+            claimPrefix: "brightness.json.restoring.",
+            in: paths.stateDirectory
+        )
     }
 
     private func startWatchdog(betterDisplay: URL, displaySessionBackup: URL) throws {

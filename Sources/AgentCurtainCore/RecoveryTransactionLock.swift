@@ -51,4 +51,13 @@ public enum RecoveryClaimFiles {
             return errno == ESRCH
         }
     }
+
+    /// A snapshot is pending either as the active file or as any in-flight claim,
+    /// including a live one owned by another process. Callers use this both to
+    /// refuse to overwrite unrecovered state and to decide when to recover first.
+    public static func hasPendingSnapshot(active: URL, claimPrefix: String, in directory: URL) -> Bool {
+        if FileManager.default.fileExists(atPath: active.path) { return true }
+        let contents = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        return contents.contains { $0.hasPrefix(claimPrefix) }
+    }
 }

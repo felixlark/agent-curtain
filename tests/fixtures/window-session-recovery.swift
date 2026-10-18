@@ -59,3 +59,10 @@ let fields = try JSONSerialization.jsonObject(with: audit) as! [String: Any]
 require(fields["error"] != nil)
 require((fields["restored"] as? Int) == 1)
 print("PASS: partial restoration retains only failed windows and records failure readback")
+
+// An orphaned recovery claim (active record gone) must still be reported as pending.
+try FileManager.default.removeItem(at: paths.windowSessionBackup)
+try WindowSessionBackupStore.write(WindowSessionBackup(ownerPID: 1, displays: [], windows: [target, other]),
+    to: paths.stateDirectory.appendingPathComponent("window-session.json.restoring.999999"))
+require(partialController.pendingRestoreCount == 2)
+print("PASS: pending restore count includes an orphaned recovery claim")

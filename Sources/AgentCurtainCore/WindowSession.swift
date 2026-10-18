@@ -258,6 +258,24 @@ public enum WindowSessionPlanner {
         )
     }
 
+    /// Split restore targets by whether their saved display returned. A single
+    /// missing display must not block windows on the displays that are present.
+    public static func partitionRestoreTargets(
+        _ windows: [SavedWindow],
+        availableUUIDs: Set<String>
+    ) -> (restorable: [SavedWindow], stranded: [SavedWindow]) {
+        var restorable: [SavedWindow] = []
+        var stranded: [SavedWindow] = []
+        for window in windows {
+            if availableUUIDs.contains(window.displayUUID) {
+                restorable.append(window)
+            } else {
+                stranded.append(window)
+            }
+        }
+        return (restorable, stranded)
+    }
+
     public static func matches(
         saved: [SavedWindow],
         candidates: [WindowMatchCandidate],
@@ -418,14 +436,23 @@ public enum WindowSessionOperations {
         let selection = WindowApplicationSelection.resolve(managed) {
             try runningApplication(for: ApplicationIdentity($0), capturedAt: backup.createdAt) != nil
         }
-        let surviving = selection.surviving
+        var surviving = selection.surviving
         var disappeared = selection.disappeared
         var unresolved = selection.failures
         var unmatched = selection.remaining
         let neededUUIDs = Set(surviving.map(\.displayUUID))
         let displays = waitForDisplays(neededUUIDs: neededUUIDs)
         let missing = neededUUIDs.subtracting(displays.keys).sorted()
-        guard missing.isEmpty else { throw WindowSessionError.missingDisplays(missing) }
+        if !missing.isEmpty {
+            // A display that did not come back must not strand the windows on the
+            // displays that did. Keep the stranded windows for the next unlock and
+            // restore the rest, matching the per-display isolation used for brightness.
+            let partition = WindowSessionPlanner.partitionRestoreTargets(
+                surviving, availableUUIDs: Set(displays.keys))
+            surviving = partition.restorable
+            unmatched.append(contentsOf: partition.stranded)
+            unresolved.append("displays not restored: \(missing.joined(separator: ", "))")
+        }
         if surviving.isEmpty {
             return WindowRestorationReport(saved: backup.windows.count, restored: 0,
                 disappeared: disappeared, excluded: excluded, remaining: unmatched, failures: unresolved)
@@ -706,10 +733,18 @@ enum WindowApplicationMetadata {
     ) throws -> Application? {
         for attempt in 0..<max(1, attempts) {
             guard isAlive?() ?? (kill(pid, 0) == 0 || errno == EPERM) else { return nil }
-            guard let launchDate = startTime.map({ $0() }) ?? ProcessStartTime.read(pid: pid) else {
-                throw WindowSessionError.restoreFailures(["cannot verify process lifetime for pid \(pid)"])
+            // A transient kernel read failure leaves the process unknown, not gone.
+            // Never accept an identity that cannot be tied to the captured process;
+            // retry within the bounded window and only fail once the attempts run out.
+            if let launchDate = startTime.map({ $0() }) ?? ProcessStartTime.read(pid: pid) {
+                guard WindowSessionPlanner.isOriginalProcess(launchDate: launchDate, capturedAt: capturedAt) else { return nil }
+            } else {
+                if attempt + 1 >= max(1, attempts) {
+                    throw WindowSessionError.restoreFailures(["cannot verify process lifetime for pid \(pid)"])
+                }
+                wait()
+                continue
             }
-            guard WindowSessionPlanner.isOriginalProcess(launchDate: launchDate, capturedAt: capturedAt) else { return nil }
             if let existing = application() {
                 let actual = bundleIdentifier(existing)
                 if expectedBundleIdentifier == nil || actual == expectedBundleIdentifier { return existing }

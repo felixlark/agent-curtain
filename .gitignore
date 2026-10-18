@@ -1,6 +1,14 @@
 .DS_Store
 *.o
+build
 build/
 .build/
 .swiftpm/
 dist/
+
+# Local acceptance evidence (dated snapshots), kept on disk but not published.
+artifacts/
+
+# macOS/iCloud conflict copies, e.g. "README 2.md", "curtain 2".
+* [0-9]
+* [0-9].*
