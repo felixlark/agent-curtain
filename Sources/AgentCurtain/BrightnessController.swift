@@ -6,6 +6,9 @@ final class BrightnessController {
     private let paths: CurtainPaths
     private var watchdog: Process?
     private var watchdogLogHandle: FileHandle?
+    /// A built-in panel that moved after recovery finished. Surfaced as a warning
+    /// instead of a failure: the write succeeded, the panel then followed ambient light.
+    private(set) var lastRecoveryWarning: String?
 
     init(paths: CurtainPaths) {
         self.paths = paths
@@ -65,9 +68,15 @@ final class BrightnessController {
         for claimed in RecoveryClaimFiles.unique(candidates) {
             do {
                 let backup = try BrightnessBackupStore.read(from: claimed)
-                do { try BrightnessRestoration.restore(backup, client: client) }
-                catch { recordAudit(backup: backup, client: client, error: error); throw error }
-                recordAudit(backup: backup, client: client, error: nil)
+                do {
+                    let report = try BrightnessRestoration.restore(backup, client: client)
+                    recordAudit(backup: backup, observed: report.observed, drift: report.drift,
+                        client: client, error: nil)
+                    lastRecoveryWarning = Self.driftWarning(report.drift)
+                } catch {
+                    recordAudit(backup: backup, observed: nil, drift: [], client: client, error: error)
+                    throw error
+                }
                 try FileManager.default.removeItem(at: claimed)
             } catch {
                 firstError = firstError ?? error
@@ -81,23 +90,43 @@ final class BrightnessController {
         watchdogLogHandle = nil
     }
 
-    private func recordAudit(backup: BrightnessBackup, client: BetterDisplayClient, error: Error?) {
+    private static func driftWarning(_ drift: [BrightnessDrift]) -> String? {
+        guard !drift.isEmpty else { return nil }
+        let reported = drift.map { entry in
+            "\(entry.uuid ?? String(entry.displayID)) \(entry.expected)→\(entry.actual)"
+        }
+        return "亮度恢复后发生漂移（已记录，可能是自动亮度）：\(reported.joined(separator: "; "))"
+    }
+
+    private func recordAudit(backup: BrightnessBackup, observed: [DisplayBrightness]?,
+                             drift: [BrightnessDrift], client: BetterDisplayClient, error: Error?) {
         struct Audit: Encodable {
             let before: BrightnessBackup
             let after: [DisplayBrightness]
+            let drift: [BrightnessDrift]
+            let warning: String?
             let error: String?
         }
-        let identities = (try? client.displays()) ?? []
-        let after = backup.displays.compactMap { saved -> DisplayBrightness? in
-            guard let id = try? BrightnessRestoration.target(for: saved, active: identities),
-                  let total = try? client.brightness(displayID: id) else { return nil }
-            return DisplayBrightness(displayID: id, brightness: total, uuid: saved.uuid,
-                hardwareBrightness: try? client.brightnessComponent("hardwareBrightness", displayID: id),
-                softwareBrightness: try? client.brightnessComponent("softwareBrightness", displayID: id))
+        // Report against live links only: inventory keeps disconnected displays that
+        // cannot answer a brightness query and must not appear as restored values.
+        let after: [DisplayBrightness]
+        if let observed {
+            after = observed
+        } else {
+            let identities = (try? client.activeDisplays()) ?? []
+            after = backup.displays.compactMap { saved -> DisplayBrightness? in
+                guard let id = try? BrightnessRestoration.target(for: saved, active: identities),
+                      let total = try? client.brightness(displayID: id) else { return nil }
+                return DisplayBrightness(displayID: id, brightness: total, uuid: saved.uuid,
+                    hardwareBrightness: try? client.brightnessComponent("hardwareBrightness", displayID: id),
+                    softwareBrightness: try? client.brightnessComponent("softwareBrightness", displayID: id))
+            }
         }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
-        if let data = try? encoder.encode(Audit(before: backup, after: after, error: error?.localizedDescription)) {
+        let audit = Audit(before: backup, after: after, drift: drift,
+            warning: Self.driftWarning(drift), error: error?.localizedDescription)
+        if let data = try? encoder.encode(audit) {
             let url = paths.stateDirectory.appendingPathComponent("last-brightness-recovery.json")
             try? data.write(to: url, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)

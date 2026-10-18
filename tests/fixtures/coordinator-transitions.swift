@@ -47,6 +47,7 @@ final class Scenario {
     var startupDisplayCalls = 0
     var startupBrightnessCalls = 0
     var startupWindowCalls = 0
+    var activeCountFails = false
     // The following observations are accessed only by main-thread fake UI/input APIs.
     var presentations: [BannerController.Presentation] = []
     var starts = 0
@@ -89,6 +90,7 @@ final class BannerController {
 final class BrightnessController {
     let scenario: Scenario
     init(paths: CurtainPaths) { scenario = Scenario.current! }
+    var lastRecoveryWarning: String?
     func recoverStaleBackup() throws {}
     func dimAllDisplays(displaySessionBackup: URL, isCancelled: () -> Bool = { false }) throws -> Int {
         precondition(!Thread.isMainThread)
@@ -117,7 +119,10 @@ final class DisplaySessionController {
     init(paths: CurtainPaths) { scenario = Scenario.current! }
     func recoverStaleBackup() throws {}
     func refreshBackendDiagnostics() {}
-    func currentActiveDisplayCount() throws -> Int { 4 }
+    func currentActiveDisplayCount() throws -> Int {
+        if scenario.activeCountFails { throw FixtureFailure(message: "fixture active display count failed") }
+        return 4
+    }
     func capture() throws -> Int { 4 }
     func disconnectExternalDisplays(isCancelled: @Sendable () -> Bool = { false }) throws -> Int {
         if isCancelled() { throw CancellationError() }
@@ -346,6 +351,29 @@ func windowFailureDoesNotLeaveStaleDisplayCountOrBlockNextDraw() throws {
 }
 
 
+func activeDisplayCountFailureDoesNotFailCompletedRecovery() throws {
+    try runScenario("active display count warning") { coordinator, scenario in
+        var drawn: ControlResponse?
+        coordinator.draw { drawn = $0 }
+        try scenario.dim.awaitEntry("count failure draw")
+        scenario.dim.release.signal()
+        try pump(until: { drawn?.ok == true }, "count failure draw completion")
+
+        scenario.activeCountFails = true
+        var opened: ControlResponse?
+        coordinator.open { opened = $0 }
+        try scenario.restore.awaitEntry("count failure restore")
+        scenario.restore.release.signal()
+        try pump(until: { opened != nil }, "count failure open completion")
+
+        try require(opened?.ok == true, "an unreadable display count cannot fail a completed recovery")
+        try require(opened?.activeDisplays == 4, "the drawn display count survives the failed read")
+        try require(coordinator.lastError == nil, "diagnostics must not become an operation error")
+        try require(coordinator.recoveryWarning?.contains("active displays") == true,
+            "the failed read is still surfaced as a warning")
+    }
+}
+
 func markerTransitions() throws {
     try runScenario("marker transitions") { coordinator, scenario in
         let marker = Int64.min + 123
@@ -399,6 +427,7 @@ let cases: [(String, () throws -> Void)] = [
     ("blocker failure with successful rollback drains open/quit", { try rollbackConcurrentRequests(restoreFails: false) }),
     ("blocker failure with failed rollback drains open/quit", { try rollbackConcurrentRequests(restoreFails: true) }),
     ("open cancels pending screen reconciliation", openingCancelsPendingScreenReconciliation),
+    ("active display count failure is a warning", activeDisplayCountFailureDoesNotFailCompletedRecovery),
 ]
 var failures = 0
 for (name, test) in cases {

@@ -22,7 +22,18 @@ let windowSessionBackupURL = URL(fileURLWithPath: arguments[4])
 let applicationURL = URL(fileURLWithPath: arguments[6])
 let client: BetterDisplayClient
 do {
-    client = try BetterDisplayClient(executable: URL(fileURLWithPath: arguments[5]))
+    // Test seam, alongside CURTAIN_WATCHDOG_OPEN_EXECUTABLE: the integration fixture
+    // cannot make CGGetActiveDisplayList report its synthetic display, so it names the
+    // live link IDs explicitly. Production always queries the system.
+    let activeDisplayProvider: @Sendable () throws -> [Int]
+    if let override = ProcessInfo.processInfo.environment["CURTAIN_WATCHDOG_ACTIVE_DISPLAYS"], !override.isEmpty {
+        let ids = override.split(separator: ",").compactMap { Int($0) }
+        activeDisplayProvider = { ids }
+    } else {
+        activeDisplayProvider = BetterDisplayClient.defaultActiveDisplayProvider
+    }
+    client = try BetterDisplayClient(executable: URL(fileURLWithPath: arguments[5]),
+        activeDisplayProvider: activeDisplayProvider)
 } catch {
     fail(error.localizedDescription)
 }
@@ -90,7 +101,7 @@ do {
                 for claimed in RecoveryClaimFiles.unique(brightnessCandidates) {
                     do {
                         let backup = try BrightnessBackupStore.read(from: claimed)
-                        try BrightnessRestoration.restore(backup, client: client)
+                        _ = try BrightnessRestoration.restore(backup, client: client)
                         try FileManager.default.removeItem(at: claimed)
                     } catch {
                         try? BrightnessBackupStore.relinquish(claimed, to: brightnessBackupURL)

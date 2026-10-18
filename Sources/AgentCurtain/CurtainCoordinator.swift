@@ -31,7 +31,14 @@ final class CurtainCoordinator {
     private(set) var displayCount = 0
     private(set) var activeDisplayCount = 0
     private(set) var lastError: String?
-    var recoveryWarning: String? { windowSession.recoveryWarning }
+    /// Diagnostics from the last recovery. These never make an operation fail, but
+    /// they are surfaced so a completed recovery is still auditable.
+    private(set) var recoveryWarnings: [String] = []
+    var recoveryWarning: String? {
+        let all = ([windowSession.recoveryWarning, brightness.lastRecoveryWarning] + recoveryWarnings)
+            .compactMap { $0 }
+        return all.isEmpty ? nil : all.joined(separator: "; ")
+    }
     var onChange: (() -> Void)?
 
     init(paths: CurtainPaths) {
@@ -49,6 +56,7 @@ final class CurtainCoordinator {
             guard let self else { return }
             var nextConfiguration: CurtainConfiguration?
             var messages: [String] = []
+            var startupWarnings: [String] = []
             do { nextConfiguration = try CurtainConfiguration.load(from: self.paths) }
             catch { messages.append("configuration: \(error.localizedDescription)") }
             do { try InjectionMarkerStore.clear(at: self.paths.injectionMarker) }
@@ -60,16 +68,21 @@ final class CurtainCoordinator {
                     self.restoreProtectionStateLocked()
                 }
                 if let error = restoration.error { messages.append(error.localizedDescription) }
+                startupWarnings = restoration.warnings
             } catch { messages.append("recovery lock: \(error.localizedDescription)") }
 
             self.displaySession.refreshBackendDiagnostics()
             var activeDisplayCount: Int?
             do { activeDisplayCount = try self.displaySession.currentActiveDisplayCount() }
-            catch { messages.append("active displays: \(error.localizedDescription)") }
+            catch {
+                // Diagnostics only: an unreadable count must not fail startup.
+                startupWarnings.append("active displays: \(error.localizedDescription)")
+            }
 
             DispatchQueue.main.async {
                 if let nextConfiguration { self.configuration = nextConfiguration }
                 if let activeDisplayCount { self.activeDisplayCount = activeDisplayCount }
+                self.recoveryWarnings = startupWarnings
                 self.phase = .open
                 self.lastError = messages.isEmpty
                     ? nil
@@ -237,6 +250,7 @@ final class CurtainCoordinator {
             let restoration = self.restoreProtectionState()
             let errors = [restoration.error?.localizedDescription, cleanupError?.localizedDescription].compactMap { $0 }
             DispatchQueue.main.async {
+                self.recoveryWarnings = restoration.warnings
                 self.finishOpening(
                     restoreError: errors.isEmpty ? nil : CurtainRecoveryError(messages: errors),
                     restoredActiveDisplayCount: restoration.activeDisplayCount
@@ -263,6 +277,7 @@ final class CurtainCoordinator {
             guard let self else { return }
             let restoration = self.restoreProtectionState()
             DispatchQueue.main.async {
+                self.recoveryWarnings = restoration.warnings
                 self.finishOpening(
                     restoreError: restoration.error,
                     operationError: error,
@@ -273,17 +288,24 @@ final class CurtainCoordinator {
         }
     }
 
-    private func restoreProtectionState() -> (error: Error?, activeDisplayCount: Int?) {
+    private struct RestorationOutcome {
+        var error: Error?
+        var activeDisplayCount: Int?
+        var warnings: [String] = []
+    }
+
+    private func restoreProtectionState() -> RestorationOutcome {
         do {
             let recoveryLock = try RecoveryTransactionLock(url: paths.recoveryLock)
             return withExtendedLifetime(recoveryLock) { restoreProtectionStateLocked() }
         } catch {
-            return (error, nil)
+            return RestorationOutcome(error: error)
         }
     }
 
-    private func restoreProtectionStateLocked() -> (error: Error?, activeDisplayCount: Int?) {
+    private func restoreProtectionStateLocked() -> RestorationOutcome {
         var messages: [String] = []
+        var warnings: [String] = []
         var displaysRestored = true
         do { try displaySession.restoreAllDisplays() }
         catch {
@@ -298,8 +320,16 @@ final class CurtainCoordinator {
         }
         var activeCount: Int?
         do { activeCount = try displaySession.currentActiveDisplayCount() }
-        catch { messages.append("active displays: \(error.localizedDescription)") }
-        return (messages.isEmpty ? nil : CurtainRecoveryError(messages: messages), activeCount)
+        catch {
+            // The displays, brightness and windows have already been restored. Reading
+            // the resulting count back is diagnostics, so a failure here is recorded as
+            // a warning instead of reporting a completed recovery as an operation failure.
+            warnings.append("active displays: \(error.localizedDescription)")
+        }
+        return RestorationOutcome(
+            error: messages.isEmpty ? nil : CurtainRecoveryError(messages: messages),
+            activeDisplayCount: activeCount,
+            warnings: warnings)
     }
 
     private func finishOpening(

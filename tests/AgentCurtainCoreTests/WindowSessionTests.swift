@@ -332,6 +332,50 @@ final class WindowSessionTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: claim.path))
     }
 
+    func testWindowWithoutScreenIdentityDisappearsOnlyOnAGenuineShortfall() {
+        let saved = window(windowID: nil)
+        // The application still reports windows and every one is already claimed by
+        // another saved window, so nothing is left for this one: it is gone.
+        XCTAssertTrue(WindowSessionPlanner.unmatchedWindowDisappeared(saved, sameProcess: true,
+            liveWindowIDs: [], liveCount: 1, matchedCount: 1))
+        // No windows yet may just mean the application has not rebuilt them.
+        XCTAssertFalse(WindowSessionPlanner.unmatchedWindowDisappeared(saved, sameProcess: true,
+            liveWindowIDs: [], liveCount: 0, matchedCount: 0))
+        // A live window is still unclaimed, so this saved window may be it.
+        XCTAssertFalse(WindowSessionPlanner.unmatchedWindowDisappeared(saved, sameProcess: true,
+            liveWindowIDs: [], liveCount: 2, matchedCount: 1))
+        // Window identity is only trustworthy inside the same process.
+        XCTAssertFalse(WindowSessionPlanner.unmatchedWindowDisappeared(saved, sameProcess: false,
+            liveWindowIDs: [], liveCount: 1, matchedCount: 1))
+    }
+
+    func testWindowWithScreenIdentityDisappearsWhenWindowServerNoLongerListsIt() {
+        let saved = window(windowID: 42)
+        XCTAssertTrue(WindowSessionPlanner.unmatchedWindowDisappeared(saved, sameProcess: true,
+            liveWindowIDs: [7, 9], liveCount: 2, matchedCount: 1))
+        XCTAssertFalse(WindowSessionPlanner.unmatchedWindowDisappeared(saved, sameProcess: true,
+            liveWindowIDs: [7, 42], liveCount: 2, matchedCount: 1))
+    }
+
+    func testClampedWindowIsRecognisedWhenTheTargetCannotFitTheVisibleArea() {
+        let visible = WindowSessionRect(x: 0, y: 30, width: 2048, height: 1048)
+        // The saved frame is taller than the usable area; the application settles it inside.
+        XCTAssertTrue(WindowSessionPlanner.isClampLimited(
+            target: WindowSessionRect(x: 0, y: 0, width: 2048, height: 1180),
+            actual: WindowSessionRect(x: 0, y: 30, width: 2048, height: 1048),
+            visible: visible))
+        // A small miss inside the usable area is not a clamp.
+        XCTAssertFalse(WindowSessionPlanner.isClampLimited(
+            target: WindowSessionRect(x: 10, y: 40, width: 1000, height: 700),
+            actual: WindowSessionRect(x: 14, y: 44, width: 1000, height: 700),
+            visible: visible))
+        // A frame that escapes the usable area was not clamped into it.
+        XCTAssertFalse(WindowSessionPlanner.isClampLimited(
+            target: WindowSessionRect(x: 0, y: 0, width: 2048, height: 1180),
+            actual: WindowSessionRect(x: 0, y: -40, width: 2048, height: 1180),
+            visible: visible))
+    }
+
     private func display(uuid: String, x: Double, y: Double, width: Double, height: Double) -> WindowDisplayGeometry {
         WindowDisplayGeometry(
             uuid: uuid,

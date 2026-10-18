@@ -276,6 +276,44 @@ public enum WindowSessionPlanner {
         return (restorable, stranded)
     }
 
+    /// Decide whether a saved window that matched no live candidate is gone.
+    /// Window identity is only trustworthy inside the same process. Without a
+    /// WindowServer identity there is nothing to look the window up by, so only a
+    /// genuine shortfall proves it disappeared: the application still reports
+    /// windows and every one of them is already claimed by another saved window.
+    /// An empty live list may just mean the application has not rebuilt its
+    /// windows yet, so it stays pending for the next unlock.
+    public static func unmatchedWindowDisappeared(
+        _ saved: SavedWindow,
+        sameProcess: Bool,
+        liveWindowIDs: Set<UInt32>,
+        liveCount: Int,
+        matchedCount: Int
+    ) -> Bool {
+        guard sameProcess else { return false }
+        if let windowID = saved.windowID { return !liveWindowIDs.contains(windowID) }
+        return liveCount > 0 && matchedCount == liveCount
+    }
+
+    /// Some applications clamp a window so it fits their usable area (menu bar,
+    /// Dock, minimum size) and ignore the remainder of the write. Retrying cannot
+    /// converge. The signature is a target that protrudes past the usable area
+    /// while the settled frame fits inside it.
+    public static func isClampLimited(
+        target: WindowSessionRect,
+        actual: WindowSessionRect,
+        visible: WindowSessionRect,
+        tolerance: Double = 2
+    ) -> Bool {
+        func fits(_ rect: WindowSessionRect) -> Bool {
+            rect.x >= visible.x - tolerance &&
+                rect.y >= visible.y - tolerance &&
+                rect.x + rect.width <= visible.x + visible.width + tolerance &&
+                rect.y + rect.height <= visible.y + visible.height + tolerance
+        }
+        return !fits(target) && fits(actual)
+    }
+
     public static func matches(
         saved: [SavedWindow],
         candidates: [WindowMatchCandidate],
@@ -341,14 +379,19 @@ public struct WindowRestorationReport: Equatable, Sendable {
     public let excluded: Int
     public let remaining: [SavedWindow]
     public let failures: [String]
+    /// Windows whose application clamped the frame after we asked for the saved one.
+    /// They are restored (not pending), but the shortfall is recorded rather than
+    /// hidden: retrying the same write can never converge.
+    public let deviations: [String]
 
-    public init(saved: Int, restored: Int, disappeared: Int, excluded: Int = 0, remaining: [SavedWindow] = [], failures: [String] = []) {
+    public init(saved: Int, restored: Int, disappeared: Int, excluded: Int = 0, remaining: [SavedWindow] = [], failures: [String] = [], deviations: [String] = []) {
         self.saved = saved
         self.restored = restored
         self.disappeared = disappeared
         self.excluded = excluded
         self.remaining = remaining
         self.failures = failures
+        self.deviations = deviations
     }
 }
 
@@ -502,9 +545,11 @@ public enum WindowSessionOperations {
                 for savedIndex in savedWindows.indices {
                     guard let liveIndex = matches[savedIndex] else {
                         let saved = savedWindows[savedIndex]
-                        if resolvedApplication.sameProcess,
-                           let windowID = saved.windowID,
-                           !currentWindowIDs.contains(windowID) {
+                        if WindowSessionPlanner.unmatchedWindowDisappeared(saved,
+                            sameProcess: resolvedApplication.sameProcess,
+                            liveWindowIDs: currentWindowIDs,
+                            liveCount: live.count,
+                            matchedCount: matches.count) {
                             disappeared += 1
                         } else {
                             unmatched.append(saved)
@@ -523,16 +568,39 @@ public enum WindowSessionOperations {
             }
         }
 
+        // Retry until every window is in place. A frame that stops changing while it
+        // is still off target means the application refuses the write, so record it
+        // below instead of re-sending the same value until the deadline.
         let deadline = Date().addingTimeInterval(3)
-        var pending = tasks
+        var pendingIndices = Array(tasks.indices)
+        var lastFrames = [WindowSessionRect?](repeating: nil, count: tasks.count)
+        var clamped = Set<Int>()
         var stablePasses = 0
         repeat {
-            for task in pending where axWindowFrame(task.element)?.isNear(task.target, tolerance: 2) != true {
-                _ = applyWindowFramePrecisely(task.element, frame: task.target)
+            for index in tasks.indices where axWindowFrame(tasks[index].element)?.isNear(tasks[index].target, tolerance: 2) != true {
+                _ = applyWindowFramePrecisely(tasks[index].element, frame: tasks[index].target)
             }
             Thread.sleep(forTimeInterval: 0.15)
-            pending = tasks.filter { axWindowFrame($0.element)?.isNear($0.target, tolerance: 2) != true }
-            if pending.isEmpty {
+            // Recomputed from every task each pass so a window that drifts back out
+            // after settling is picked up again, exactly as before.
+            var offTarget: [Int] = []
+            for index in tasks.indices {
+                let actual = axWindowFrame(tasks[index].element)
+                guard actual?.isNear(tasks[index].target, tolerance: 2) != true else {
+                    lastFrames[index] = nil
+                    clamped.remove(index)
+                    continue
+                }
+                if let actual, actual == lastFrames[index] {
+                    clamped.insert(index)
+                } else {
+                    clamped.remove(index)
+                }
+                lastFrames[index] = actual
+                offTarget.append(index)
+            }
+            pendingIndices = offTarget
+            if pendingIndices.isEmpty {
                 stablePasses += 1
                 if stablePasses >= 8 { break }
             } else {
@@ -540,38 +608,53 @@ public enum WindowSessionOperations {
             }
         } while Date() < deadline
 
+        let visible = pendingIndices.isEmpty ? [:] : visibleDisplayFrames()
         // The Dock can claim space after the display reconnects. Some apps refuse to
         // grow beyond the current visible frame even when the saved frame was valid.
-        if !pending.isEmpty {
-            let visible = visibleDisplayFrames()
-            let fallback = pending.compactMap { task -> WindowRestoreTask? in
-                guard let area = visible[task.saved.displayUUID] else { return nil }
-                let fitted = WindowSessionPlanner.frameFittingVisibleArea(task.target, in: area)
-                guard fitted != task.target else { return nil }
-                return WindowRestoreTask(saved: task.saved, element: task.element, target: fitted)
+        if !pendingIndices.isEmpty {
+            let fallback = pendingIndices.compactMap { index -> (Int, WindowRestoreTask)? in
+                guard let area = visible[tasks[index].saved.displayUUID] else { return nil }
+                let fitted = WindowSessionPlanner.frameFittingVisibleArea(tasks[index].target, in: area)
+                guard fitted != tasks[index].target else { return nil }
+                return (index, WindowRestoreTask(saved: tasks[index].saved, element: tasks[index].element, target: fitted))
             }
             let fallbackDeadline = Date().addingTimeInterval(2)
-            for task in fallback {
+            for (_, task) in fallback {
                 repeat {
                     if axWindowFrame(task.element)?.isNear(task.target, tolerance: 2) == true { break }
                     _ = applyWindowFramePrecisely(task.element, frame: task.target)
                     Thread.sleep(forTimeInterval: 0.15)
                 } while Date() < fallbackDeadline
             }
-            pending.removeAll { original in
-                fallback.contains { fitted in
-                    fitted.saved == original.saved &&
-                        axWindowFrame(fitted.element)?.isNear(fitted.target, tolerance: 2) == true
-                }
-            }
+            let settled = Set(fallback.filter {
+                axWindowFrame($0.1.element)?.isNear($0.1.target, tolerance: 2) == true
+            }.map(\.0))
+            pendingIndices.removeAll { settled.contains($0) }
         }
 
-        let failed = unresolved + pending.map {
+        // A settled window that cannot fit its saved frame is clamped by its own
+        // application. Count it as restored and record the deviation: the window is
+        // where the application allows it to be, and retrying changes nothing.
+        var pendingTasks: [WindowRestoreTask] = []
+        var deviations: [String] = []
+        for index in pendingIndices {
+            let task = tasks[index]
+            let actual = axWindowFrame(task.element)
+            if clamped.contains(index), let actual,
+               let area = visible[task.saved.displayUUID],
+               WindowSessionPlanner.isClampLimited(target: task.target, actual: actual, visible: area) {
+                deviations.append("\(task.saved.applicationName) window \(task.saved.windowID.map(String.init) ?? String(task.saved.ordinal)) clamped to \(actual) instead of \(task.target)")
+                continue
+            }
+            pendingTasks.append(task)
+        }
+
+        let failed = unresolved + pendingTasks.map {
                 "\($0.saved.applicationName) window \($0.saved.windowID.map(String.init) ?? String($0.saved.ordinal)) target=\($0.target) actual=\(String(describing: axWindowFrame($0.element)))"
             }
         return WindowRestorationReport(saved: backup.windows.count,
-            restored: tasks.count - pending.count, disappeared: disappeared, excluded: excluded,
-            remaining: unmatched + pending.map(\.saved), failures: failed)
+            restored: tasks.count - pendingTasks.count, disappeared: disappeared, excluded: excluded,
+            remaining: unmatched + pendingTasks.map(\.saved), failures: failed, deviations: deviations)
     }
 }
 

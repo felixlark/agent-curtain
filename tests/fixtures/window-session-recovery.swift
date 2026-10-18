@@ -66,3 +66,18 @@ try WindowSessionBackupStore.write(WindowSessionBackup(ownerPID: 1, displays: []
     to: paths.stateDirectory.appendingPathComponent("window-session.json.restoring.999999"))
 require(partialController.pendingRestoreCount == 2)
 print("PASS: pending restore count includes an orphaned recovery claim")
+
+// A window clamped by its application is a recorded deviation, not a failure: the
+// snapshot must be retired and the shortfall must still be surfaced.
+for claim in RecoveryClaimFiles.recoverable(in: paths.stateDirectory, prefix: "window-session.json.restoring.") {
+    try FileManager.default.removeItem(at: claim)
+}
+try WindowSessionBackupStore.write(partial, to: paths.windowSessionBackup)
+let clampedController = WindowSessionController(paths: paths, restoreOperation: { _ in
+    WindowRestorationReport(saved: 2, restored: 2, disappeared: 0,
+        deviations: ["Example window 1 clamped to (0, 30, 100, 100) instead of (0, 0, 100, 100)"])
+})
+_ = try clampedController.restoreAllWindows()
+require(clampedController.recoveryWarning?.contains("clamped") == true)
+require(!FileManager.default.fileExists(atPath: paths.windowSessionBackup.path))
+print("PASS: clamped deviation is recorded without failing the restoration")

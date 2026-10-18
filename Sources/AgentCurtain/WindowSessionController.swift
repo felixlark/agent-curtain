@@ -69,8 +69,13 @@ final class WindowSessionController {
                 combined = WindowRestorationReport(
                     saved: (combined?.saved ?? 0) + result.saved,
                     restored: (combined?.restored ?? 0) + result.restored,
-                    disappeared: (combined?.disappeared ?? 0) + result.disappeared
+                    disappeared: (combined?.disappeared ?? 0) + result.disappeared,
+                    deviations: (combined?.deviations ?? []) + result.deviations
                 )
+                if !result.deviations.isEmpty {
+                    recoveryWarning = "窗口已恢复但被应用夹取（\(result.deviations.count) 个）：" +
+                        result.deviations.joined(separator: "; ")
+                }
                 try FileManager.default.removeItem(at: claimed)
             } catch {
                 firstError = firstError ?? error
@@ -90,11 +95,13 @@ final class WindowSessionController {
             let disappeared: Int
             let excluded: Int
             let remaining: [SavedWindow]
+            let deviations: [String]
             let error: String?
         }
         let audit = Audit(before: before, after: try? captureOperation(),
             restored: report?.restored ?? 0, disappeared: report?.disappeared ?? 0,
             excluded: report?.excluded ?? 0, remaining: report?.remaining ?? before.windows,
+            deviations: report?.deviations ?? [],
             error: error?.localizedDescription)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
