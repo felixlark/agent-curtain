@@ -15,16 +15,25 @@ final class DisplaySessionController {
         try paths.prepareDirectories()
         // A snapshot left by an interrupted session is recoverable state, not a
         // reason to refuse a new draw. Recover it first, exactly as startup does;
-        // if it is still unrecoverable the explicit failure below is kept.
-        if hasBackup { try restoreAllDisplays() }
-        guard !hasBackup else { throw DisplaySessionControllerError.unrestoredBackup }
+        // Any unavailable displays remain in the snapshot for a later hot-plug.
+        if hasBackup { try? restoreAllDisplays() }
         let client = try BetterDisplayClient()
         let backend = try DisplayConnectionBackendFactory.select(client: client)
-        let backup = try DisplaySessionOperations.capture(
+        let captured = try DisplaySessionOperations.capture(
             ownerPID: getpid(),
             client: client,
             connectionBackend: backend.kind
         )
+        let backup: DisplaySessionBackup
+        if let pending = try? DisplaySessionBackupStore.read(from: paths.displaySessionBackup) {
+            let previousUUIDs = Set(pending.displays.map(\.uuid))
+            let offline = pending.displays
+            let additions = captured.displays.filter { !previousUUIDs.contains($0.uuid) }
+            backup = DisplaySessionBackup(ownerPID: getpid(), connectionBackend: backend.kind,
+                displays: offline + additions)
+        } else {
+            backup = captured
+        }
         try DisplaySessionBackupStore.write(backup, to: paths.displaySessionBackup)
         lastBackendKind = backend.kind
         return backup.displays.count
@@ -42,12 +51,15 @@ final class DisplaySessionController {
         }
         let backend = try DisplayConnectionBackendFactory.restoreBackend(for: backup, client: client)
         lastBackendKind = backup.connectionBackend ?? backend.kind
-        return try DisplaySessionOperations.disconnectExternalDisplays(
+        let activeExternal = try DisplaySessionOperations.activeExternalDisplays(in: backup, client: client)
+        try DisplaySessionOperations.disconnectDisplays(
+            activeExternal,
             backup: backup,
             client: client,
             backend: backend,
             isCancelled: isCancelled
         )
+        return backup.displays.count
     }
 
     func reconcileNewDisplays() throws -> Int {
@@ -98,10 +110,26 @@ final class DisplaySessionController {
                 if backup != saved {
                     try DisplaySessionBackupStore.write(backup, to: claimed)
                 }
-                let backend = try DisplayConnectionBackendFactory.restoreBackend(for: backup, client: client)
-                lastBackendKind = backup.connectionBackend ?? backend.kind
-                try DisplaySessionOperations.restore(backup, client: client, backend: backend)
-                try FileManager.default.removeItem(at: claimed)
+                let activeUUIDs = Set(try client.activeDisplays().compactMap(\.uuid))
+                let ready = backup.displays.filter { activeUUIDs.contains($0.uuid) }
+                let pending = backup.displays.filter { !activeUUIDs.contains($0.uuid) }
+                if !ready.isEmpty {
+                    let availableBackup = DisplaySessionBackup(ownerPID: backup.ownerPID,
+                        createdAt: backup.createdAt, connectionBackend: backup.connectionBackend,
+                        displays: ready)
+                    let backend = try DisplayConnectionBackendFactory.restoreBackend(for: availableBackup, client: client)
+                    lastBackendKind = backup.connectionBackend ?? backend.kind
+                    try DisplaySessionOperations.restore(availableBackup, client: client, backend: backend)
+                }
+                if pending.isEmpty {
+                    try FileManager.default.removeItem(at: claimed)
+                } else {
+                    let remaining = DisplaySessionBackup(ownerPID: backup.ownerPID,
+                        createdAt: backup.createdAt, connectionBackend: backup.connectionBackend,
+                        displays: pending)
+                    try DisplaySessionBackupStore.write(remaining, to: claimed)
+                    try DisplaySessionBackupStore.relinquish(claimed, to: original)
+                }
             } catch {
                 firstError = firstError ?? error
                 try? DisplaySessionBackupStore.relinquish(claimed, to: original)

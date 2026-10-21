@@ -18,27 +18,31 @@ final class BrightnessController {
         try paths.prepareDirectories()
         // A brightness snapshot left by an interrupted session is recoverable state,
         // not a reason to refuse a new draw. Recover it first, then re-check.
-        if hasPendingBrightnessSnapshot { try restoreAllDisplays() }
-        guard !FileManager.default.fileExists(atPath: paths.brightnessBackup.path) else {
-            throw BrightnessControllerError.unrestoredBackup
-        }
-
+        if hasPendingBrightnessSnapshot { try? restoreAllDisplays() }
         let client = try BetterDisplayClient()
-        let identities = try client.displays()
-        let displays = try identities.map { identity in
+        let previousBackup = try? BrightnessBackupStore.read(from: paths.brightnessBackup)
+        let identities = try client.activeDisplays()
+        let capturedDisplays = try identities.map { identity in
             if isCancelled() { throw CancellationError() }
             return DisplayBrightness(displayID: identity.displayID, brightness: try client.brightness(displayID: identity.displayID), uuid: identity.uuid,
                 hardwareBrightness: try? client.brightnessComponent("hardwareBrightness", displayID: identity.displayID),
                 softwareBrightness: try? client.brightnessComponent("softwareBrightness", displayID: identity.displayID))
         }
         if isCancelled() { throw CancellationError() }
+        let previous = previousBackup?.displays ?? []
+        let previousUUIDs = Set(previous.compactMap(\.uuid))
+        let additions = capturedDisplays.filter { display in
+            guard let uuid = display.uuid else { return true }
+            return !previousUUIDs.contains(uuid)
+        }
+        let displays = previous + additions
         let backup = BrightnessBackup(ownerPID: getpid(), displays: displays)
         try BrightnessBackupStore.write(backup, to: paths.brightnessBackup)
 
         do {
             if isCancelled() { throw CancellationError() }
             try startWatchdog(betterDisplay: client.executable, displaySessionBackup: displaySessionBackup)
-            for display in displays {
+            for display in capturedDisplays {
                 if isCancelled() { throw CancellationError() }
                 let readback = try client.setBrightnessAndReadback(displayID: display.displayID, value: 0)
                 guard readback <= 0.01 else {
@@ -68,8 +72,20 @@ final class BrightnessController {
         for claimed in RecoveryClaimFiles.unique(candidates) {
             do {
                 let backup = try BrightnessBackupStore.read(from: claimed)
+                let active = try client.activeDisplays()
+                let readyUUIDs = Set(active.compactMap(\.uuid))
+                let ready = backup.displays.filter { saved in
+                    if let uuid = saved.uuid { return readyUUIDs.contains(uuid) }
+                    return active.contains { $0.displayID == saved.displayID }
+                }
+                let pending = backup.displays.filter { saved in
+                    if let uuid = saved.uuid { return !readyUUIDs.contains(uuid) }
+                    return !active.contains { $0.displayID == saved.displayID }
+                }
                 do {
-                    let report = try BrightnessRestoration.restore(backup, client: client)
+                    let readyBackup = BrightnessBackup(ownerPID: backup.ownerPID,
+                        createdAt: backup.createdAt, displays: ready)
+                    let report = try BrightnessRestoration.restore(readyBackup, client: client)
                     recordAudit(backup: backup, observed: report.observed, drift: report.drift,
                         client: client, error: nil)
                     lastRecoveryWarning = Self.driftWarning(report.drift)
@@ -77,7 +93,14 @@ final class BrightnessController {
                     recordAudit(backup: backup, observed: nil, drift: [], client: client, error: error)
                     throw error
                 }
-                try FileManager.default.removeItem(at: claimed)
+                if pending.isEmpty {
+                    try FileManager.default.removeItem(at: claimed)
+                } else {
+                    let remaining = BrightnessBackup(ownerPID: backup.ownerPID,
+                        createdAt: backup.createdAt, displays: pending)
+                    try BrightnessBackupStore.write(remaining, to: claimed)
+                    try BrightnessBackupStore.relinquish(claimed, to: original)
+                }
             } catch {
                 firstError = firstError ?? error
                 try? BrightnessBackupStore.relinquish(claimed, to: original)

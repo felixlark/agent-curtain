@@ -48,6 +48,8 @@ final class Scenario {
     var startupBrightnessCalls = 0
     var startupWindowCalls = 0
     var activeCountFails = false
+    var offlineRestorePending = false
+    var savedDisplayOnline = false
     // The following observations are accessed only by main-thread fake UI/input APIs.
     var presentations: [BannerController.Presentation] = []
     var starts = 0
@@ -132,8 +134,11 @@ final class DisplaySessionController {
     func restoreAllDisplays() throws {
         scenario.startupDisplayCalls += 1
         if scenario.startupDisplayFails { throw FixtureFailure(message: "startup display failed") }
+        if scenario.offlineRestorePending && scenario.savedDisplayOnline {
+            scenario.offlineRestorePending = false
+        }
     }
-    var pendingRestoreCount: Int { 0 }
+    var pendingRestoreCount: Int { scenario.offlineRestorePending ? 5 : 0 }
     var displayBackendStatus: String? { "system-spi" }
     var betterDisplayProStatus: String { "off" }
     var privateDisplaySPIStatus: String { "available" }
@@ -374,6 +379,30 @@ func activeDisplayCountFailureDoesNotFailCompletedRecovery() throws {
     }
 }
 
+func offlineDisplayBackupDoesNotBlockDrawAndRestoresWhenOnline() throws {
+    try runScenario("offline saved display", body: { coordinator, scenario in
+        scenario.offlineRestorePending = true
+        var drawn: ControlResponse?
+        coordinator.draw { drawn = $0 }
+        try scenario.dim.awaitEntry("draw with an offline display backup")
+        scenario.dim.release.signal()
+        try pump(until: { drawn != nil }, "offline backup draw completion")
+        try require(drawn?.ok == true && coordinator.phase == .drawn,
+            "an offline display restore must not block protection")
+        try require(coordinator.response(ok: true).restorePending == 5,
+            "offline display backups remain visible as pending while protected")
+
+        scenario.savedDisplayOnline = true
+        var opened: ControlResponse?
+        coordinator.open { opened = $0 }
+        try scenario.restore.awaitEntry("restore after display reconnect")
+        scenario.restore.release.signal()
+        try pump(until: { opened != nil }, "reconnected display restore completion")
+        try require(opened?.ok == true && !scenario.offlineRestorePending,
+            "a reconnected display is restored and removed from pending state")
+    })
+}
+
 func markerTransitions() throws {
     try runScenario("marker transitions") { coordinator, scenario in
         let marker = Int64.min + 123
@@ -428,6 +457,7 @@ let cases: [(String, () throws -> Void)] = [
     ("blocker failure with failed rollback drains open/quit", { try rollbackConcurrentRequests(restoreFails: true) }),
     ("open cancels pending screen reconciliation", openingCancelsPendingScreenReconciliation),
     ("active display count failure is a warning", activeDisplayCountFailureDoesNotFailCompletedRecovery),
+    ("offline display backup permits draw and restores after reconnect", offlineDisplayBackupDoesNotBlockDrawAndRestoresWhenOnline),
 ]
 var failures = 0
 for (name, test) in cases {
