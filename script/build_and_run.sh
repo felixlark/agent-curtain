@@ -211,6 +211,7 @@ case "$MODE" in
     zsh "$ROOT_DIR/tests/banner-layout.zsh"
     zsh "$ROOT_DIR/tests/coordinator-transitions.zsh"
     zsh "$ROOT_DIR/tests/window-session-recovery.zsh"
+    zsh "$ROOT_DIR/tests/repair-restore-pending.zsh"
     CURTAIN_SWIFTPM_SCRATCH_PATH="$SWIFTPM_SCRATCH_PATH" "$ROOT_DIR/tests/watchdog-integration.zsh"
     swiftc -typecheck -parse-as-library "$ROOT_DIR/script/verify_banner_framebuffer.swift" \
       -framework CoreGraphics \

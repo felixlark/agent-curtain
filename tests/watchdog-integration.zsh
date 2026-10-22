@@ -13,8 +13,12 @@ cleanup() {
 trap cleanup EXIT
 
 scratch=${CURTAIN_SWIFTPM_SCRATCH_PATH:-$(mktemp -d /tmp/agent-curtain-watchdog-swiftpm.XXXXXX)}
-swift build --package-path "$root" --scratch-path "$scratch" >/dev/null
-bin_dir=$(swift build --package-path "$root" --scratch-path "$scratch" --show-bin-path)
+# SwiftPM's own sandbox cannot be applied inside a managed agent session; the
+# package itself needs no network or privileged access.
+swift_build=(swift build --package-path "$root" --scratch-path "$scratch" --disable-sandbox
+  --cache-path "$scratch/cache" --config-path "$scratch/config" --security-path "$scratch/security")
+"${swift_build[@]}" >/dev/null
+bin_dir=$("${swift_build[@]}" --show-bin-path)
 fake_cli="$root/tests/fixtures/fake-betterdisplaycli"
 chmod +x "$fake_cli"
 log="$fixture/betterdisplay.log"

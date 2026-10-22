@@ -156,6 +156,30 @@ the app retries any orphaned restore record.
 Display-change notifications rebuild banners and reconcile newly attached
 display IDs into the brightness backup before dimming them.
 
+A saved display can outlive its hardware: a monitor is unplugged, or macOS
+renumbers the topology. Such a UUID is never submitted to WindowServer — that is
+the `complete returned 1001` loop that used to pin `restore-pending` forever.
+Displays the system still knows about stay in the snapshot (including ones the
+curtain itself disconnected, so a hot-plug still restores them); displays it no
+longer reports are retired with an audit copy `*.retired-unavailable-displays-*`
+and a warning. Windows saved on a retired display are retired the same way, and a
+layout transaction that keeps returning `1001` is retried a bounded number of
+times and then abandoned with a warning, so `curtain on` and `curtain off` stay
+usable. Brightness readback tolerates a 0.02 gap (0.741 vs 0.73 is quantization,
+not a failed restore).
+
+If an existing state directory is already stuck, repair it without losing
+evidence:
+
+```bash
+python3 script/repair-restore-pending.py --dry-run   # show what would be retired
+python3 script/repair-restore-pending.py             # back up, then retire
+```
+
+The tool refuses to run while the curtain is drawn, copies every file it touches
+to `<name>.bak-<timestamp>` and `backup-<timestamp>/`, and never writes to a
+display, installs anything, or asks for elevated permissions.
+
 AgentCurtain never calls `pmset displaysleepnow`: display sleep stops framebuffer
 composition and blinds GUI agents.
 

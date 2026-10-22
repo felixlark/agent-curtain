@@ -72,35 +72,27 @@ final class BrightnessController {
         for claimed in RecoveryClaimFiles.unique(candidates) {
             do {
                 let backup = try BrightnessBackupStore.read(from: claimed)
-                let active = try client.activeDisplays()
-                let readyUUIDs = Set(active.compactMap(\.uuid))
-                let ready = backup.displays.filter { saved in
-                    if let uuid = saved.uuid { return readyUUIDs.contains(uuid) }
-                    return active.contains { $0.displayID == saved.displayID }
-                }
-                let pending = backup.displays.filter { saved in
-                    if let uuid = saved.uuid { return !readyUUIDs.contains(uuid) }
-                    return !active.contains { $0.displayID == saved.displayID }
-                }
                 do {
-                    let readyBackup = BrightnessBackup(ownerPID: backup.ownerPID,
-                        createdAt: backup.createdAt, displays: ready)
-                    let report = try BrightnessRestoration.restore(readyBackup, client: client)
+                    // The report retires saved displays the system no longer reports,
+                    // so one unplugged monitor cannot pin the whole backup forever.
+                    let report = try BrightnessRestoration.restore(backup, client: client)
                     recordAudit(backup: backup, observed: report.observed, drift: report.drift,
-                        client: client, error: nil)
+                        client: client, error: nil, retired: report.retired)
                     lastRecoveryWarning = Self.driftWarning(report.drift)
+                    if !report.retired.isEmpty {
+                        let described = report.retired
+                            .map { $0.uuid ?? String($0.displayID) }
+                            .sorted().joined(separator: ", ")
+                        _ = try? RecoveryArchive.preserve(claimed, reason: "unavailable-displays")
+                        let retirement = "已退役不存在的显示器亮度备份：\(described)"
+                        lastRecoveryWarning = [lastRecoveryWarning, retirement]
+                            .compactMap { $0 }.joined(separator: "; ")
+                    }
                 } catch {
                     recordAudit(backup: backup, observed: nil, drift: [], client: client, error: error)
                     throw error
                 }
-                if pending.isEmpty {
-                    try FileManager.default.removeItem(at: claimed)
-                } else {
-                    let remaining = BrightnessBackup(ownerPID: backup.ownerPID,
-                        createdAt: backup.createdAt, displays: pending)
-                    try BrightnessBackupStore.write(remaining, to: claimed)
-                    try BrightnessBackupStore.relinquish(claimed, to: original)
-                }
+                try FileManager.default.removeItem(at: claimed)
             } catch {
                 firstError = firstError ?? error
                 try? BrightnessBackupStore.relinquish(claimed, to: original)
@@ -122,11 +114,13 @@ final class BrightnessController {
     }
 
     private func recordAudit(backup: BrightnessBackup, observed: [DisplayBrightness]?,
-                             drift: [BrightnessDrift], client: BetterDisplayClient, error: Error?) {
+                             drift: [BrightnessDrift], client: BetterDisplayClient, error: Error?,
+                             retired: [DisplayBrightness] = []) {
         struct Audit: Encodable {
             let before: BrightnessBackup
             let after: [DisplayBrightness]
             let drift: [BrightnessDrift]
+            let retired: [DisplayBrightness]?
             let warning: String?
             let error: String?
         }
@@ -147,8 +141,12 @@ final class BrightnessController {
         }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
+        let retirement = retired.isEmpty ? nil
+            : "已退役不存在的显示器亮度备份：\(retired.map { $0.uuid ?? String($0.displayID) }.sorted().joined(separator: ", "))"
         let audit = Audit(before: backup, after: after, drift: drift,
-            warning: Self.driftWarning(drift), error: error?.localizedDescription)
+            retired: retired.isEmpty ? nil : retired,
+            warning: [Self.driftWarning(drift), retirement].compactMap { $0 }.joined(separator: "; "),
+            error: error?.localizedDescription)
         if let data = try? encoder.encode(audit) {
             let url = paths.stateDirectory.appendingPathComponent("last-brightness-recovery.json")
             try? data.write(to: url, options: .atomic)

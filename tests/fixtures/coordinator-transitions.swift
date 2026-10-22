@@ -50,6 +50,8 @@ final class Scenario {
     var activeCountFails = false
     var offlineRestorePending = false
     var savedDisplayOnline = false
+    var retiredDisplays: Set<String> = []
+    var lastWindowRetirement: Set<String> = []
     // The following observations are accessed only by main-thread fake UI/input APIs.
     var presentations: [BannerController.Presentation] = []
     var starts = 0
@@ -125,17 +127,34 @@ final class DisplaySessionController {
         if scenario.activeCountFails { throw FixtureFailure(message: "fixture active display count failed") }
         return 4
     }
-    func capture() throws -> Int { 4 }
+    func capture() throws -> Int {
+        // The real controller recovers a pending snapshot before capturing a new
+        // draw, so a vanished display is retired at draw time as well.
+        try restoreAllDisplays()
+        return 4
+    }
     func disconnectExternalDisplays(isCancelled: @Sendable () -> Bool = { false }) throws -> Int {
         if isCancelled() { throw CancellationError() }
         return 4
     }
     func reconcileNewDisplays() throws -> Int { 4 }
+    private(set) var lastRestoreWarning: String?
+    var lastRetiredDisplays: Set<String> { scenario.retiredDisplays }
+    func resetRetirement() {
+        lastRestoreWarning = nil
+        scenario.retiredDisplays = []
+    }
     func restoreAllDisplays() throws {
         scenario.startupDisplayCalls += 1
         if scenario.startupDisplayFails { throw FixtureFailure(message: "startup display failed") }
-        if scenario.offlineRestorePending && scenario.savedDisplayOnline {
+        // Offline saved displays are retired after their bounded retry window, so a
+        // vanished monitor can no longer pin restore-pending forever.
+        // Restore is called during prepare (before the scenario is armed) and again
+        // when the test arms a pending display, so retire on every observed pass.
+        if scenario.offlineRestorePending {
             scenario.offlineRestorePending = false
+            scenario.retiredDisplays = ["gone"]
+            lastRestoreWarning = "saved displays are no longer present and were retired: gone"
         }
     }
     var pendingRestoreCount: Int { scenario.offlineRestorePending ? 5 : 0 }
@@ -151,8 +170,9 @@ final class WindowSessionController {
     var lastCapturedCount = 0
     var lastRestoredCount = 0
     func capture() throws -> Int { 3 }
-    func restoreAllWindows() throws -> WindowRestorationReport? {
+    func restoreAllWindows(retiredDisplays: Set<String>) throws -> WindowRestorationReport? {
         if !scenario.prepared { scenario.startupWindowCalls += 1 }
+        scenario.lastWindowRetirement = retiredDisplays
         if scenario.windowRestoreFails { throw FixtureFailure(message: "window restoration refused") }
         return nil
     }
@@ -379,27 +399,33 @@ func activeDisplayCountFailureDoesNotFailCompletedRecovery() throws {
     }
 }
 
-func offlineDisplayBackupDoesNotBlockDrawAndRestoresWhenOnline() throws {
-    try runScenario("offline saved display", body: { coordinator, scenario in
+func retiredDisplayDoesNotBlockDrawOrLeavePending() throws {
+    try runScenario("retired saved display", body: { coordinator, scenario in
         scenario.offlineRestorePending = true
         var drawn: ControlResponse?
         coordinator.draw { drawn = $0 }
-        try scenario.dim.awaitEntry("draw with an offline display backup")
+        try scenario.dim.awaitEntry("draw with a retired display backup")
         scenario.dim.release.signal()
-        try pump(until: { drawn != nil }, "offline backup draw completion")
+        try pump(until: { drawn != nil }, "retired backup draw completion")
         try require(drawn?.ok == true && coordinator.phase == .drawn,
-            "an offline display restore must not block protection")
-        try require(coordinator.response(ok: true).restorePending == 5,
-            "offline display backups remain visible as pending while protected")
+            "a retired display restore must not block protection")
+        try require(scenario.retiredDisplays == ["gone"],
+            "the vanished display must be retired during the draw recovery")
+        try require(scenario.lastWindowRetirement == [],
+            "retirement during draw must not leak into a later window restore")
 
-        scenario.savedDisplayOnline = true
         var opened: ControlResponse?
         coordinator.open { opened = $0 }
-        try scenario.restore.awaitEntry("restore after display reconnect")
+        try scenario.restore.awaitEntry("restore after retirement")
         scenario.restore.release.signal()
-        try pump(until: { opened != nil }, "reconnected display restore completion")
-        try require(opened?.ok == true && !scenario.offlineRestorePending,
-            "a reconnected display is restored and removed from pending state")
+        try pump(until: { opened != nil }, "retirement restore completion")
+        try require(opened?.ok == true, "a retired display must leave status ok=true")
+        try require(opened?.restorePending == 0, "no restore-pending entries may remain")
+        try require(opened?.displayMode == "all-displays", "mode must return to all-displays")
+        try require(scenario.lastWindowRetirement == ["gone"],
+            "windows on the retired display are handed to the window path")
+        try require(coordinator.recoveryWarning?.contains("retired") == true,
+            "the retirement stays visible as a warning")
     })
 }
 
@@ -457,7 +483,7 @@ let cases: [(String, () throws -> Void)] = [
     ("blocker failure with failed rollback drains open/quit", { try rollbackConcurrentRequests(restoreFails: true) }),
     ("open cancels pending screen reconciliation", openingCancelsPendingScreenReconciliation),
     ("active display count failure is a warning", activeDisplayCountFailureDoesNotFailCompletedRecovery),
-    ("offline display backup permits draw and restores after reconnect", offlineDisplayBackupDoesNotBlockDrawAndRestoresWhenOnline),
+    ("retired display permits draw and leaves no restore-pending", retiredDisplayDoesNotBlockDrawOrLeavePending),
 ]
 var failures = 0
 for (name, test) in cases {

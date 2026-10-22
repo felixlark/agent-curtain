@@ -312,10 +312,16 @@ final class CurtainCoordinator {
             displaysRestored = false
             messages.append("display restore: \(error.localizedDescription)")
         }
+        if let retirement = displaySession.lastRestoreWarning {
+            warnings.append(retirement)
+        }
         do { try brightness.restoreAllDisplays() }
         catch { messages.append("brightness restore: \(error.localizedDescription)") }
         if displaysRestored {
-            do { _ = try windowSession.restoreAllWindows() }
+            // Windows saved on a retired display cannot be placed again. Passing the
+            // retired set lets the window path retire them instead of pending forever.
+            do { _ = try windowSession.restoreAllWindows(
+                retiredDisplays: displaySession.lastRetiredDisplays) }
             catch { messages.append("window restore: \(error.localizedDescription)") }
         }
         var activeCount: Int?

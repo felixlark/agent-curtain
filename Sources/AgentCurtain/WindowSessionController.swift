@@ -4,7 +4,7 @@ import Foundation
 final class WindowSessionController {
     private let paths: CurtainPaths
     private let captureOperation: () throws -> WindowSessionBackup
-    private let restoreOperation: (WindowSessionBackup) throws -> WindowRestorationReport
+    private let restoreOperation: (WindowSessionBackup, Set<String>) throws -> WindowRestorationReport
     private(set) var recoveryWarning: String?
     private(set) var lastCapturedCount = 0
     private(set) var lastRestoredCount = 0
@@ -14,7 +14,9 @@ final class WindowSessionController {
         captureOperation: @escaping () throws -> WindowSessionBackup = {
             try WindowSessionOperations.capture(ownerPID: getpid(), excludingBundleIdentifier: Bundle.main.bundleIdentifier)
         },
-        restoreOperation: @escaping (WindowSessionBackup) throws -> WindowRestorationReport = WindowSessionOperations.restore
+        restoreOperation: @escaping (WindowSessionBackup, Set<String>) throws -> WindowRestorationReport = {
+            try WindowSessionOperations.restore($0, retiredDisplays: $1)
+        }
     ) {
         self.paths = paths
         self.captureOperation = captureOperation
@@ -35,6 +37,14 @@ final class WindowSessionController {
 
     @discardableResult
     func restoreAllWindows() throws -> WindowRestorationReport? {
+        try restoreAllWindows(retiredDisplays: [])
+    }
+
+    /// `retiredDisplays` comes from the display recovery that just ran. Windows
+    /// saved on a display the system no longer reports are retired and archived:
+    /// keeping them pending is what leaves an unlock stuck at a positive count.
+    @discardableResult
+    func restoreAllWindows(retiredDisplays: Set<String>) throws -> WindowRestorationReport? {
         let original = paths.windowSessionBackup
         var candidates: [URL] = []
         if let claimed = try WindowSessionBackupStore.claim(original) { candidates.append(claimed) }
@@ -52,10 +62,16 @@ final class WindowSessionController {
                 var report: WindowRestorationReport?
                 var operationError: Error?
                 defer { recordAudit(before: backup, report: report, error: operationError) }
-                do { report = try restoreOperation(backup) }
+                do { report = try restoreOperation(backup, retiredDisplays) }
                 catch { operationError = error; throw error }
                 let result = report!
                 lastRestoredCount = result.restored
+                if !result.retiredWindows.isEmpty {
+                    _ = try? RecoveryArchive.preserve(claimed, reason: "retired-display-windows")
+                    let described = result.retiredWindows.map(\.description).joined(separator: "; ")
+                    recoveryWarning = [recoveryWarning, "已退役不存在显示器上的窗口：\(described)"]
+                        .compactMap { $0 }.joined(separator: "; ")
+                }
                 if !result.failures.isEmpty {
                     // Retire completed targets before returning the partial failure.
                     // The original timestamp still protects against PID reuse.
@@ -70,7 +86,8 @@ final class WindowSessionController {
                     saved: (combined?.saved ?? 0) + result.saved,
                     restored: (combined?.restored ?? 0) + result.restored,
                     disappeared: (combined?.disappeared ?? 0) + result.disappeared,
-                    deviations: (combined?.deviations ?? []) + result.deviations
+                    deviations: (combined?.deviations ?? []) + result.deviations,
+                    retiredWindows: (combined?.retiredWindows ?? []) + result.retiredWindows
                 )
                 if !result.deviations.isEmpty {
                     recoveryWarning = "窗口已恢复但被应用夹取（\(result.deviations.count) 个）：" +
@@ -96,12 +113,14 @@ final class WindowSessionController {
             let excluded: Int
             let remaining: [SavedWindow]
             let deviations: [String]
+            let retired: [RetiredWindow]?
             let error: String?
         }
         let audit = Audit(before: before, after: try? captureOperation(),
             restored: report?.restored ?? 0, disappeared: report?.disappeared ?? 0,
             excluded: report?.excluded ?? 0, remaining: report?.remaining ?? before.windows,
             deviations: report?.deviations ?? [],
+            retired: report.map { $0.retiredWindows.isEmpty ? nil : $0.retiredWindows } ?? nil,
             error: error?.localizedDescription)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
