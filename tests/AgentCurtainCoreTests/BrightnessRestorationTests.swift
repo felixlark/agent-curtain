@@ -116,7 +116,9 @@ import Testing
     }
 
     /// Inventory keeps disconnected displays; writing to them can hit a recycled
-    /// displayID. Only live links may be written.
+    /// displayID. Only live links may be written. Since the 2026-10-22 incident an
+    /// inactive entry no longer fails the whole restore: it is retired and reported,
+    /// but it is still never written.
     @Test func inactiveInventoryDisplayIsNeverWritten() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -136,9 +138,8 @@ import Testing
             activeDisplayProvider: { [5] })
         let backup = BrightnessBackup(ownerPID: 1, displays: [
             DisplayBrightness(displayID: 4, brightness: 0.8, uuid: "mi")])
-        #expect(throws: (any Error).self) {
-            try BrightnessRestoration.restore(backup, client: client, activeAttempts: 1)
-        }
+        let report = try BrightnessRestoration.restore(backup, client: client, activeAttempts: 1)
+        #expect(report.retired.map(\.uuid) == ["mi"])
         let calls = (try? String(contentsOf: root.appendingPathComponent("calls"), encoding: .utf8)) ?? ""
         #expect(!calls.contains("-displayID=4"), "inventory-only display must never be written")
     }

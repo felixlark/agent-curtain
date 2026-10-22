@@ -253,11 +253,75 @@ public enum DisplaySessionOperations {
         client: BetterDisplayClient,
         backend: any DisplayConnectionBackend
     ) throws {
+        try restoreLayoutAndModes(backup, client: client, backend: backend, attempts: 3)
+    }
+
+    /// Restore only the displays the system still reports, and retire the rest.
+    ///
+    /// A saved snapshot can outlive its hardware: the operator unplugs a monitor,
+    /// or macOS renumbers the topology. Submitting those identifiers to
+    /// WindowServer is what produces `complete returned 1001` on every unlock, so
+    /// they are never written. They leave the snapshot with an archived record
+    /// instead of blocking `curtain on` forever.
+    ///
+    /// `configurationAttempts` bounds the retry loop for the transaction itself.
+    /// A display that still fails after the bound is abandoned as a warning: the
+    /// operator gets a usable curtain either way.
+    public static func restoreAvailable(
+        _ backup: DisplaySessionBackup,
+        client: BetterDisplayClient,
+        backend: any DisplayConnectionBackend,
+        configurationAttempts: Int = 3
+    ) throws -> DisplayRestoreReport {
+        let saved = backup.displays
+        let inventory = Set(try client.displays().compactMap(\.uuid))
+        let active = Set(try client.activeDisplays().compactMap(\.uuid))
+        let partition = RecoveryRetirement.partition(saved.map(\.uuid),
+            inventory: inventory, active: active)
+        let availableUUIDs = Set(partition.available)
+        let available = saved.filter { availableUUIDs.contains($0.uuid) }
+        let unavailable = saved.filter { !availableUUIDs.contains($0.uuid) }
+        guard !available.isEmpty else {
+            return DisplayRestoreReport(retired: unavailable.map(\.uuid))
+        }
+
+        let scoped = DisplaySessionBackup(ownerPID: backup.ownerPID, createdAt: backup.createdAt,
+            connectionBackend: backup.connectionBackend, displays: available)
+        do {
+            try restoreLayoutAndModes(scoped, client: client, backend: backend,
+                attempts: configurationAttempts)
+        } catch {
+            // The backend already retried. Abandoning the layout keeps the displays
+            // connected and the curtain usable; the shortfall is reported, not hidden.
+            guard isAbandonableConfigurationFailure(error) else { throw error }
+            return DisplayRestoreReport(retired: unavailable.map(\.uuid),
+                warnings: ["display layout abandoned after \(max(1, configurationAttempts)) attempts: \(error.localizedDescription)"])
+        }
+        return DisplayRestoreReport(restored: available.map(\.uuid), retired: unavailable.map(\.uuid))
+    }
+
+    /// A WindowServer transaction that keeps refusing cannot be fixed by retrying
+    /// forever; it must degrade to an audited warning.
+    static func isAbandonableConfigurationFailure(_ error: Error) -> Bool {
+        switch error {
+        case DisplayConnectionBackendError.configuration: return true
+        case BetterDisplayError.commandFailed(let message):
+            return message.contains("complete returned") || message.contains("layout readback")
+        default: return false
+        }
+    }
+
+    private static func restoreLayoutAndModes(
+        _ backup: DisplaySessionBackup,
+        client: BetterDisplayClient,
+        backend: any DisplayConnectionBackend,
+        attempts: Int
+    ) throws {
         try backend.reconnectDisplays(backup: backup)
 
         var failures: [String] = []
         if backend.kind == .systemSPI {
-            do { try restoreLayoutInOneTransaction(backup, client: client) }
+            do { try restoreLayoutInOneTransaction(backup, client: client, attempts: attempts) }
             catch { failures.append("layout: \(error.localizedDescription)") }
         } else {
             if let main = backup.displays.first(where: \.wasMain) {
@@ -301,22 +365,68 @@ public enum DisplaySessionOperations {
 
     /// Main display and all origins share one WindowServer transaction. Per-screen
     /// placement writes otherwise trigger several screen-change waves and app reflows.
-    private static func restoreLayoutInOneTransaction(_ backup: DisplaySessionBackup, client: BetterDisplayClient) throws {
+    ///
+    /// `attempts` bounds how many times a transaction may be reissued. `complete`
+    /// returning 1001 means the configuration was rejected, usually because the
+    /// topology changed while it was being prepared. The transaction is rebuilt
+    /// from a fresh active set on each retry, and the last error is surfaced once
+    /// the bound is exhausted so the caller can degrade instead of hanging.
+    static func restoreLayoutInOneTransaction(
+        _ backup: DisplaySessionBackup,
+        client: BetterDisplayClient,
+        attempts: Int = 3,
+        activeDisplays: (() throws -> [DisplayIdentity])? = nil,
+        commit: ([(CGDirectDisplayID, Int32, Int32)]) throws -> Void = DisplaySessionOperations.commitLayout
+    ) throws {
         let expectedUUIDs = Set(backup.displays.map(\.uuid))
-        // WindowServer display IDs settle before BetterDisplay's UUID metadata.
-        // Transitional UNKNOWN entries are not identities and must never key a map.
-        let active = try client.waitForActiveDisplays(uuids: expectedUUIDs, exact: false)
-        let ids = try layoutDisplayIDs(active, expectedUUIDs: expectedUUIDs)
-        let changes = try backup.displays.map { saved -> (CGDirectDisplayID, Int32, Int32) in
-            guard let id = ids[saved.uuid], let origin = placementOrigin(saved.placement) else {
-                throw BetterDisplayError.invalidValue("placement \(saved.uuid): \(saved.placement)")
+        var lastError: Error?
+        for attempt in 0..<max(1, attempts) {
+            do {
+                // WindowServer display IDs settle before BetterDisplay's UUID metadata.
+                // Transitional UNKNOWN entries are not identities and must never key a map.
+                let active = try activeDisplays?()
+                    ?? client.waitForActiveDisplays(uuids: expectedUUIDs, exact: false)
+                let ids = try layoutDisplayIDs(active, expectedUUIDs: expectedUUIDs)
+                let changes = try backup.displays.map { saved -> (CGDirectDisplayID, Int32, Int32) in
+                    guard let id = ids[saved.uuid], let origin = placementOrigin(saved.placement) else {
+                        throw BetterDisplayError.invalidValue("placement \(saved.uuid): \(saved.placement)")
+                    }
+                    return (id, origin.0, origin.1)
+                }
+                try commit(changes)
+                // Validate by UUID after committing; a successful transaction alone is not proof.
+                for saved in backup.displays {
+                    guard try client.feature("placement", uuid: saved.uuid) == saved.placement else {
+                        throw BetterDisplayError.commandFailed("layout readback mismatch for \(saved.uuid)")
+                    }
+                }
+                if let main = backup.displays.first(where: \.wasMain) {
+                    try client.waitForMainDisplay(uuid: main.uuid)
+                }
+                return
+            } catch {
+                lastError = error
+                guard attempt + 1 < max(1, attempts), isRetryable(error) else { throw error }
+                Thread.sleep(forTimeInterval: 0.5)
             }
-            return (id, origin.0, origin.1)
         }
-        guard changes.contains(where: { id, x, y in
-            let bounds = CGDisplayBounds(id)
-            return bounds.origin.x != Double(x) || bounds.origin.y != Double(y)
-        }) || backup.displays.first(where: \.wasMain).flatMap({ ids[$0.uuid] }) != CGMainDisplayID() else { return }
+        throw lastError ?? DisplayConnectionBackendError.configuration("layout did not complete")
+    }
+
+    /// 1001 (`kCGErrorFailure`) is returned when the configuration is rejected,
+    /// typically a race with a display attach/detach. Rebuilding it once is useful;
+    /// repeating it forever is not.
+    static func isRetryable(_ error: Error) -> Bool {
+        switch error {
+        case DisplayConnectionBackendError.configuration(let message):
+            return message.contains("complete returned")
+                || message.contains("begin returned")
+        default:
+            return false
+        }
+    }
+
+    static func commitLayout(_ changes: [(CGDirectDisplayID, Int32, Int32)]) throws {
         var configuration: CGDisplayConfigRef?
         let begin = CGBeginDisplayConfiguration(&configuration)
         guard begin == .success, let configuration else {
@@ -332,18 +442,9 @@ public enum DisplaySessionOperations {
         }
         let result = CGCompleteDisplayConfiguration(configuration, .forSession)
         guard result == .success else {
-            throw DisplayConnectionBackendError.configuration("layout complete returned \(result.rawValue)")
+            throw DisplayConnectionBackendError.configuration("complete returned \(result.rawValue)")
         }
         completed = true
-        // Validate by UUID after committing; a successful transaction alone is not proof.
-        for saved in backup.displays {
-            guard try client.feature("placement", uuid: saved.uuid) == saved.placement else {
-                throw BetterDisplayError.commandFailed("layout readback mismatch for \(saved.uuid)")
-            }
-        }
-        if let main = backup.displays.first(where: \.wasMain) {
-            try client.waitForMainDisplay(uuid: main.uuid)
-        }
     }
 
     static func layoutDisplayIDs(_ active: [DisplayIdentity], expectedUUIDs: Set<String>) throws -> [String: CGDirectDisplayID] {

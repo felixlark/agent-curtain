@@ -18,27 +18,31 @@ final class BrightnessController {
         try paths.prepareDirectories()
         // A brightness snapshot left by an interrupted session is recoverable state,
         // not a reason to refuse a new draw. Recover it first, then re-check.
-        if hasPendingBrightnessSnapshot { try restoreAllDisplays() }
-        guard !FileManager.default.fileExists(atPath: paths.brightnessBackup.path) else {
-            throw BrightnessControllerError.unrestoredBackup
-        }
-
+        if hasPendingBrightnessSnapshot { try? restoreAllDisplays() }
         let client = try BetterDisplayClient()
-        let identities = try client.displays()
-        let displays = try identities.map { identity in
+        let previousBackup = try? BrightnessBackupStore.read(from: paths.brightnessBackup)
+        let identities = try client.activeDisplays()
+        let capturedDisplays = try identities.map { identity in
             if isCancelled() { throw CancellationError() }
             return DisplayBrightness(displayID: identity.displayID, brightness: try client.brightness(displayID: identity.displayID), uuid: identity.uuid,
                 hardwareBrightness: try? client.brightnessComponent("hardwareBrightness", displayID: identity.displayID),
                 softwareBrightness: try? client.brightnessComponent("softwareBrightness", displayID: identity.displayID))
         }
         if isCancelled() { throw CancellationError() }
+        let previous = previousBackup?.displays ?? []
+        let previousUUIDs = Set(previous.compactMap(\.uuid))
+        let additions = capturedDisplays.filter { display in
+            guard let uuid = display.uuid else { return true }
+            return !previousUUIDs.contains(uuid)
+        }
+        let displays = previous + additions
         let backup = BrightnessBackup(ownerPID: getpid(), displays: displays)
         try BrightnessBackupStore.write(backup, to: paths.brightnessBackup)
 
         do {
             if isCancelled() { throw CancellationError() }
             try startWatchdog(betterDisplay: client.executable, displaySessionBackup: displaySessionBackup)
-            for display in displays {
+            for display in capturedDisplays {
                 if isCancelled() { throw CancellationError() }
                 let readback = try client.setBrightnessAndReadback(displayID: display.displayID, value: 0)
                 guard readback <= 0.01 else {
@@ -69,10 +73,21 @@ final class BrightnessController {
             do {
                 let backup = try BrightnessBackupStore.read(from: claimed)
                 do {
+                    // The report retires saved displays the system no longer reports,
+                    // so one unplugged monitor cannot pin the whole backup forever.
                     let report = try BrightnessRestoration.restore(backup, client: client)
                     recordAudit(backup: backup, observed: report.observed, drift: report.drift,
-                        client: client, error: nil)
+                        client: client, error: nil, retired: report.retired)
                     lastRecoveryWarning = Self.driftWarning(report.drift)
+                    if !report.retired.isEmpty {
+                        let described = report.retired
+                            .map { $0.uuid ?? String($0.displayID) }
+                            .sorted().joined(separator: ", ")
+                        _ = try? RecoveryArchive.preserve(claimed, reason: "unavailable-displays")
+                        let retirement = "已退役不存在的显示器亮度备份：\(described)"
+                        lastRecoveryWarning = [lastRecoveryWarning, retirement]
+                            .compactMap { $0 }.joined(separator: "; ")
+                    }
                 } catch {
                     recordAudit(backup: backup, observed: nil, drift: [], client: client, error: error)
                     throw error
@@ -99,11 +114,13 @@ final class BrightnessController {
     }
 
     private func recordAudit(backup: BrightnessBackup, observed: [DisplayBrightness]?,
-                             drift: [BrightnessDrift], client: BetterDisplayClient, error: Error?) {
+                             drift: [BrightnessDrift], client: BetterDisplayClient, error: Error?,
+                             retired: [DisplayBrightness] = []) {
         struct Audit: Encodable {
             let before: BrightnessBackup
             let after: [DisplayBrightness]
             let drift: [BrightnessDrift]
+            let retired: [DisplayBrightness]?
             let warning: String?
             let error: String?
         }
@@ -124,8 +141,12 @@ final class BrightnessController {
         }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
+        let retirement = retired.isEmpty ? nil
+            : "已退役不存在的显示器亮度备份：\(retired.map { $0.uuid ?? String($0.displayID) }.sorted().joined(separator: ", "))"
         let audit = Audit(before: backup, after: after, drift: drift,
-            warning: Self.driftWarning(drift), error: error?.localizedDescription)
+            retired: retired.isEmpty ? nil : retired,
+            warning: [Self.driftWarning(drift), retirement].compactMap { $0 }.joined(separator: "; "),
+            error: error?.localizedDescription)
         if let data = try? encoder.encode(audit) {
             let url = paths.stateDirectory.appendingPathComponent("last-brightness-recovery.json")
             try? data.write(to: url, options: .atomic)

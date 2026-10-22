@@ -6,6 +6,17 @@ final class DisplaySessionController {
     private let paths: CurtainPaths
     private(set) var lastBackendKind: DisplayConnectionBackendKind?
     private(set) var betterDisplayProStatus = "unknown"
+    /// Diagnostics from retired or abandoned recovery entries. Never fails an
+    /// operation: the curtain is usable, the shortfall is auditable.
+    private(set) var lastRestoreWarning: String?
+    /// Displays retired by the most recent restore, handed to the window path so
+    /// windows on vanished displays are retired instead of pending forever.
+    private(set) var lastRetiredDisplays: Set<String> = []
+
+    func resetRetirement() {
+        lastRestoreWarning = nil
+        lastRetiredDisplays = []
+    }
 
     init(paths: CurtainPaths) {
         self.paths = paths
@@ -14,17 +25,29 @@ final class DisplaySessionController {
     func capture() throws -> Int {
         try paths.prepareDirectories()
         // A snapshot left by an interrupted session is recoverable state, not a
-        // reason to refuse a new draw. Recover it first, exactly as startup does;
-        // if it is still unrecoverable the explicit failure below is kept.
-        if hasBackup { try restoreAllDisplays() }
-        guard !hasBackup else { throw DisplaySessionControllerError.unrestoredBackup }
+        // reason to refuse a new draw. Recover it first, exactly as startup does.
+        if hasBackup { try? restoreAllDisplays() }
         let client = try BetterDisplayClient()
         let backend = try DisplayConnectionBackendFactory.select(client: client)
-        let backup = try DisplaySessionOperations.capture(
+        let captured = try DisplaySessionOperations.capture(
             ownerPID: getpid(),
             client: client,
             connectionBackend: backend.kind
         )
+        // A still-present but unplugged display keeps its saved entry so a hot-plug
+        // can restore it. A display the system no longer knows about is retired:
+        // keeping it would make every future restore write an impossible identity.
+        let inventory = Set(try client.displays().compactMap(\.uuid))
+        let previous = (try? DisplaySessionBackupStore.read(from: paths.displaySessionBackup))?.displays ?? []
+        let capturedUUIDs = Set(captured.displays.map(\.uuid))
+        let retained = previous.filter { !capturedUUIDs.contains($0.uuid) && inventory.contains($0.uuid) }
+        let retired = previous.filter { !capturedUUIDs.contains($0.uuid) && !inventory.contains($0.uuid) }
+        if !retired.isEmpty {
+            lastRestoreWarning = RecoveryRetirement.describeUnavailable(retired.map(\.uuid))
+            lastRetiredDisplays.formUnion(retired.map(\.uuid))
+        }
+        let backup = DisplaySessionBackup(ownerPID: getpid(), connectionBackend: backend.kind,
+            displays: captured.displays + retained)
         try DisplaySessionBackupStore.write(backup, to: paths.displaySessionBackup)
         lastBackendKind = backend.kind
         return backup.displays.count
@@ -42,12 +65,15 @@ final class DisplaySessionController {
         }
         let backend = try DisplayConnectionBackendFactory.restoreBackend(for: backup, client: client)
         lastBackendKind = backup.connectionBackend ?? backend.kind
-        return try DisplaySessionOperations.disconnectExternalDisplays(
+        let activeExternal = try DisplaySessionOperations.activeExternalDisplays(in: backup, client: client)
+        try DisplaySessionOperations.disconnectDisplays(
+            activeExternal,
             backup: backup,
             client: client,
             backend: backend,
             isCancelled: isCancelled
         )
+        return backup.displays.count
     }
 
     func reconcileNewDisplays() throws -> Int {
@@ -98,9 +124,21 @@ final class DisplaySessionController {
                 if backup != saved {
                     try DisplaySessionBackupStore.write(backup, to: claimed)
                 }
-                let backend = try DisplayConnectionBackendFactory.restoreBackend(for: backup, client: client)
-                lastBackendKind = backup.connectionBackend ?? backend.kind
-                try DisplaySessionOperations.restore(backup, client: client, backend: backend)
+                let report = try DisplaySessionOperations.restoreAvailable(
+                    backup, client: client, backend: try DisplayConnectionBackendFactory.restoreBackend(
+                        for: backup, client: client))
+                lastBackendKind = backup.connectionBackend
+                if !report.retired.isEmpty {
+                    // The saved hardware is gone. Keep the evidence and move on: a
+                    // permanently pending entry is what made `curtain on` unusable.
+                    _ = try? RecoveryArchive.preserve(claimed, reason: "unavailable-displays")
+                    lastRestoreWarning = RecoveryRetirement.describeUnavailable(report.retired)
+                    lastRetiredDisplays.formUnion(report.retired)
+                }
+                if !report.warnings.isEmpty {
+                    lastRestoreWarning = ([lastRestoreWarning] + report.warnings)
+                        .compactMap { $0 }.joined(separator: "; ")
+                }
                 try FileManager.default.removeItem(at: claimed)
             } catch {
                 firstError = firstError ?? error

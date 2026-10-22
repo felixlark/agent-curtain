@@ -74,8 +74,11 @@ do {
                         if backup != saved {
                             try DisplaySessionBackupStore.write(backup, to: claimed)
                         }
-                        let backend = try DisplayConnectionBackendFactory.restoreBackend(for: backup, client: client)
-                        try DisplaySessionOperations.restore(backup, client: client, backend: backend)
+                        // Retire displays the system no longer reports instead of
+                        // writing impossible identifiers; a vanished monitor must not
+                        // leave the watchdog stuck at restore-pending.
+                        _ = try DisplaySessionOperations.restoreAvailable(backup, client: client,
+                            backend: try DisplayConnectionBackendFactory.restoreBackend(for: backup, client: client))
                         try FileManager.default.removeItem(at: claimed)
                     } catch {
                         try? DisplaySessionBackupStore.relinquish(claimed, to: displaySessionBackupURL)
@@ -101,6 +104,8 @@ do {
                 for claimed in RecoveryClaimFiles.unique(brightnessCandidates) {
                     do {
                         let backup = try BrightnessBackupStore.read(from: claimed)
+                        // BrightnessRestoration retires saved displays that are no
+                        // longer present, so one unplugged monitor cannot pin the file.
                         _ = try BrightnessRestoration.restore(backup, client: client)
                         try FileManager.default.removeItem(at: claimed)
                     } catch {

@@ -276,6 +276,27 @@ public enum WindowSessionPlanner {
         return (restorable, stranded)
     }
 
+    /// A window whose display was retired can never be placed again. Its record is
+    /// dropped from the pending snapshot and reported, so the remaining windows can
+    /// still be restored and the pending count does not stick.
+    public static func retireStrandedWindows(
+        _ stranded: [SavedWindow],
+        retiredDisplays: Set<String>
+    ) -> (retired: [RetiredWindow], stillPending: [SavedWindow]) {
+        var retired: [RetiredWindow] = []
+        var pending: [SavedWindow] = []
+        for window in stranded {
+            if retiredDisplays.contains(window.displayUUID) {
+                retired.append(RetiredWindow(applicationName: window.applicationName,
+                    windowID: window.windowID, ordinal: window.ordinal,
+                    displayUUID: window.displayUUID))
+            } else {
+                pending.append(window)
+            }
+        }
+        return (retired, pending)
+    }
+
     /// Decide whether a saved window that matched no live candidate is gone.
     /// Window identity is only trustworthy inside the same process. Without a
     /// WindowServer identity there is nothing to look the window up by, so only a
@@ -383,8 +404,13 @@ public struct WindowRestorationReport: Equatable, Sendable {
     /// They are restored (not pending), but the shortfall is recorded rather than
     /// hidden: retrying the same write can never converge.
     public let deviations: [String]
+    /// Windows dropped because their saved display no longer exists. They kept the
+    /// snapshot pending forever, so the shortfall is recorded and retired.
+    public let retiredWindows: [RetiredWindow]
 
-    public init(saved: Int, restored: Int, disappeared: Int, excluded: Int = 0, remaining: [SavedWindow] = [], failures: [String] = [], deviations: [String] = []) {
+    public init(saved: Int, restored: Int, disappeared: Int, excluded: Int = 0,
+                remaining: [SavedWindow] = [], failures: [String] = [],
+                deviations: [String] = [], retiredWindows: [RetiredWindow] = []) {
         self.saved = saved
         self.restored = restored
         self.disappeared = disappeared
@@ -392,6 +418,7 @@ public struct WindowRestorationReport: Equatable, Sendable {
         self.remaining = remaining
         self.failures = failures
         self.deviations = deviations
+        self.retiredWindows = retiredWindows
     }
 }
 
@@ -468,6 +495,16 @@ public enum WindowSessionOperations {
     }
 
     public static func restore(_ backup: WindowSessionBackup) throws -> WindowRestorationReport {
+        try restore(backup, retiredDisplays: [])
+    }
+
+    /// `retiredDisplays` names saved displays the display-recovery path retired
+    /// because the system no longer reports them. Windows saved on those displays
+    /// can never be placed again, so they are retired too instead of pending.
+    public static func restore(
+        _ backup: WindowSessionBackup,
+        retiredDisplays: Set<String>
+    ) throws -> WindowRestorationReport {
         guard backup.windows.isEmpty || AXIsProcessTrusted() else {
             throw WindowSessionError.accessibilityPermission
         }
@@ -483,6 +520,14 @@ public enum WindowSessionOperations {
         var disappeared = selection.disappeared
         var unresolved = selection.failures
         var unmatched = selection.remaining
+        var retiredWindows: [RetiredWindow] = []
+        if !retiredDisplays.isEmpty {
+            let retirement = WindowSessionPlanner.retireStrandedWindows(
+                surviving.filter { retiredDisplays.contains($0.displayUUID) },
+                retiredDisplays: retiredDisplays)
+            retiredWindows.append(contentsOf: retirement.retired)
+            surviving.removeAll { retiredDisplays.contains($0.displayUUID) }
+        }
         let neededUUIDs = Set(surviving.map(\.displayUUID))
         let displays = waitForDisplays(neededUUIDs: neededUUIDs)
         let missing = neededUUIDs.subtracting(displays.keys).sorted()
@@ -498,7 +543,8 @@ public enum WindowSessionOperations {
         }
         if surviving.isEmpty {
             return WindowRestorationReport(saved: backup.windows.count, restored: 0,
-                disappeared: disappeared, excluded: excluded, remaining: unmatched, failures: unresolved)
+                disappeared: disappeared, excluded: excluded, remaining: unmatched,
+                failures: unresolved, retiredWindows: retiredWindows)
         }
 
         // WindowServer reports geometry before every application has handled its screen-change
@@ -654,7 +700,8 @@ public enum WindowSessionOperations {
             }
         return WindowRestorationReport(saved: backup.windows.count,
             restored: tasks.count - pendingTasks.count, disappeared: disappeared, excluded: excluded,
-            remaining: unmatched + pendingTasks.map(\.saved), failures: failed, deviations: deviations)
+            remaining: unmatched + pendingTasks.map(\.saved), failures: failed,
+            deviations: deviations, retiredWindows: retiredWindows)
     }
 }
 

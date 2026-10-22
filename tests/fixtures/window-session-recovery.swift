@@ -10,7 +10,7 @@ try paths.prepareDirectories()
 let old = WindowSessionBackup(ownerPID: 1, displays: [], windows: [])
 let fresh = WindowSessionBackup(ownerPID: 2, displays: [], windows: [])
 try WindowSessionBackupStore.write(old, to: paths.windowSessionBackup)
-let controller = WindowSessionController(paths: paths, captureOperation: { fresh }, restoreOperation: { _ in throw Failure.refused })
+let controller = WindowSessionController(paths: paths, captureOperation: { fresh }, restoreOperation: { _, _ in throw Failure.refused })
 do { _ = try controller.restoreAllWindows(); fatalError("must report restoration failure") } catch Failure.refused {}
 let retained = try WindowSessionBackupStore.read(from: paths.windowSessionBackup)
 require(retained == old)
@@ -25,7 +25,7 @@ let stillFresh = try WindowSessionBackupStore.read(from: paths.windowSessionBack
 require(stillFresh == fresh)
 print("PASS: capture failure leaves existing recovery snapshot intact")
 var restoredOwners: [Int32] = []
-let recovered = WindowSessionController(paths: paths, restoreOperation: { backup in
+let recovered = WindowSessionController(paths: paths, restoreOperation: { backup, _ in
     restoredOwners.append(backup.ownerPID)
     return WindowRestorationReport(saved: 0, restored: 0, disappeared: 0)
 })
@@ -43,7 +43,7 @@ let other = SavedWindow(ownerPID: 1, bundleIdentifier: "example", applicationNam
     ordinal: 1, displayUUID: "screen", frame: target.frame, relativeFrame: target.relativeFrame)
 let partial = WindowSessionBackup(ownerPID: 1, displays: [], windows: [target, other])
 try WindowSessionBackupStore.write(partial, to: paths.windowSessionBackup)
-let partialController = WindowSessionController(paths: paths, captureOperation: { partial }, restoreOperation: { backup in
+let partialController = WindowSessionController(paths: paths, captureOperation: { partial }, restoreOperation: { backup, _ in
     require(backup.windows.count == 2)
     return WindowRestorationReport(saved: 2, restored: 1, disappeared: 0,
         remaining: [other], failures: ["Example window 2"])
@@ -73,7 +73,7 @@ for claim in RecoveryClaimFiles.recoverable(in: paths.stateDirectory, prefix: "w
     try FileManager.default.removeItem(at: claim)
 }
 try WindowSessionBackupStore.write(partial, to: paths.windowSessionBackup)
-let clampedController = WindowSessionController(paths: paths, restoreOperation: { _ in
+let clampedController = WindowSessionController(paths: paths, restoreOperation: { _, _ in
     WindowRestorationReport(saved: 2, restored: 2, disappeared: 0,
         deviations: ["Example window 1 clamped to (0, 30, 100, 100) instead of (0, 0, 100, 100)"])
 })
