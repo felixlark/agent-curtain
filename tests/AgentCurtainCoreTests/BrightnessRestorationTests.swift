@@ -139,7 +139,8 @@ import Testing
         let backup = BrightnessBackup(ownerPID: 1, displays: [
             DisplayBrightness(displayID: 4, brightness: 0.8, uuid: "mi")])
         let report = try BrightnessRestoration.restore(backup, client: client, activeAttempts: 1)
-        #expect(report.retired.map(\.uuid) == ["mi"])
+        #expect(report.retired.isEmpty)
+        #expect(report.deferred.map(\.uuid) == ["mi"])
         let calls = (try? String(contentsOf: root.appendingPathComponent("calls"), encoding: .utf8)) ?? ""
         #expect(!calls.contains("-displayID=4"), "inventory-only display must never be written")
     }

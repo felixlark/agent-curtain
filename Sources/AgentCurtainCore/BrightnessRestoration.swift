@@ -41,12 +41,14 @@ public struct BrightnessRestoreReport: Equatable, Sendable {
     /// Saved displays the system no longer reports. They were skipped rather than
     /// written, and their backup entries are retired by the caller.
     public let retired: [DisplayBrightness]
+    public let deferred: [DisplayBrightness]
 
     public init(observed: [DisplayBrightness] = [], drift: [BrightnessDrift] = [],
-                retired: [DisplayBrightness] = []) {
+                retired: [DisplayBrightness] = [], deferred: [DisplayBrightness] = []) {
         self.observed = observed
         self.drift = drift
         self.retired = retired
+        self.deferred = deferred
     }
 }
 
@@ -95,7 +97,10 @@ public enum BrightnessRestoration {
 
         // A saved display the system no longer reports can never be written. It is
         // retired with a warning instead of failing the whole restore forever.
-        let retired = backup.displays.filter { (try? target(for: $0, active: active)) == nil }
+        let inventory = try client.displays()
+        let missing = backup.displays.filter { (try? target(for: $0, active: active)) == nil }
+        let retired = missing.filter { (try? target(for: $0, active: inventory)) == nil }
+        let deferred = missing.filter { (try? target(for: $0, active: inventory)) != nil }
         let restorable = backup.displays.filter { (try? target(for: $0, active: active)) != nil }
 
         var failures: [String] = []
@@ -111,10 +116,12 @@ public enum BrightnessRestoration {
                     throw BetterDisplayError.commandFailed("displayID=\(id) brightness \(value), expected \(saved.brightness)")
                 }
                 if let hardware = saved.hardwareBrightness {
-                    try client.restoreBrightnessComponent("hardwareBrightness", displayID: id, value: hardware)
+                    try client.restoreBrightnessComponent("hardwareBrightness", displayID: id, value: hardware,
+                        tolerance: driftTolerance)
                 }
                 if let software = saved.softwareBrightness {
-                    try client.restoreBrightnessComponent("softwareBrightness", displayID: id, value: software)
+                    try client.restoreBrightnessComponent("softwareBrightness", displayID: id, value: software,
+                        tolerance: driftTolerance)
                 }
                 // Component writes can change the aggregate brightness. Verify the
                 // entire tuple after the last write, across a settling interval.
@@ -157,7 +164,7 @@ public enum BrightnessRestoration {
         if !failures.isEmpty {
             throw BetterDisplayError.commandFailed(failures.joined(separator: "; "))
         }
-        return BrightnessRestoreReport(observed: observed, drift: drift, retired: retired)
+        return BrightnessRestoreReport(observed: observed, drift: drift, retired: retired, deferred: deferred)
     }
 
     public static func reconciliationPlan(

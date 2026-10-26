@@ -4,22 +4,26 @@ import Foundation
 
 final class BrightnessController {
     private let paths: CurtainPaths
+    private let clientFactory: () throws -> BetterDisplayClient
     private var watchdog: Process?
     private var watchdogLogHandle: FileHandle?
     /// A built-in panel that moved after recovery finished. Surfaced as a warning
     /// instead of a failure: the write succeeded, the panel then followed ambient light.
     private(set) var lastRecoveryWarning: String?
 
-    init(paths: CurtainPaths) {
+    init(paths: CurtainPaths,
+         clientFactory: @escaping () throws -> BetterDisplayClient = { try BetterDisplayClient() }) {
         self.paths = paths
+        self.clientFactory = clientFactory
     }
 
     func dimAllDisplays(displaySessionBackup: URL, isCancelled: () -> Bool = { false }) throws -> Int {
         try paths.prepareDirectories()
         // A brightness snapshot left by an interrupted session is recoverable state,
         // not a reason to refuse a new draw. Recover it first, then re-check.
-        if hasPendingBrightnessSnapshot { try? restoreAllDisplays() }
-        let client = try BetterDisplayClient()
+        try restoreAllDisplays()
+        guard !hasPendingBrightnessSnapshot else { throw BrightnessControllerError.unrestoredBackup }
+        let client = try clientFactory()
         let previousBackup = try? BrightnessBackupStore.read(from: paths.brightnessBackup)
         let identities = try client.activeDisplays()
         let capturedDisplays = try identities.map { identity in
@@ -57,7 +61,7 @@ final class BrightnessController {
     }
 
     func restoreAllDisplays() throws {
-        let client = try BetterDisplayClient()
+        let client = try clientFactory()
         let original = paths.brightnessBackup
         var candidates: [URL] = []
         if let claimed = try BrightnessBackupStore.claim(original) {
@@ -67,26 +71,55 @@ final class BrightnessController {
             in: paths.stateDirectory,
             prefix: "brightness.json.restoring."
         ))
+        let deferred = try DeferredRecovery.candidates(for: original)
+        if !deferred.isEmpty {
+            let active = try client.activeDisplays()
+            candidates.insert(contentsOf: try deferred.filter {
+                try BrightnessBackupStore.read(from: $0).displays.contains {
+                    (try? BrightnessRestoration.target(for: $0, active: active)) != nil
+                }
+            }, at: 0)
+        }
 
         var firstError: Error?
         for claimed in RecoveryClaimFiles.unique(candidates) {
             do {
-                let backup = try BrightnessBackupStore.read(from: claimed)
+                let complete = try BrightnessBackupStore.read(from: claimed)
+                let isDeferred = DeferredRecovery.isDeferred(claimed, for: original)
+                let active = isDeferred ? try client.activeDisplays() : []
+                let backup = BrightnessBackup(ownerPID: complete.ownerPID, createdAt: complete.createdAt,
+                    displays: complete.displays.filter {
+                        !isDeferred || (try? BrightnessRestoration.target(for: $0, active: active)) != nil
+                    })
                 do {
                     // The report retires saved displays the system no longer reports,
                     // so one unplugged monitor cannot pin the whole backup forever.
                     let report = try BrightnessRestoration.restore(backup, client: client)
                     recordAudit(backup: backup, observed: report.observed, drift: report.drift,
-                        client: client, error: nil, retired: report.retired)
+                        client: client, error: nil, retired: report.retired, deferred: report.deferred)
                     lastRecoveryWarning = Self.driftWarning(report.drift)
-                    if !report.retired.isEmpty {
-                        let described = report.retired
+                    if !(report.retired + report.deferred).isEmpty {
+                        let described = (report.retired + report.deferred)
                             .map { $0.uuid ?? String($0.displayID) }
                             .sorted().joined(separator: ", ")
-                        _ = try? RecoveryArchive.preserve(claimed, reason: "unavailable-displays")
-                        let retirement = "已退役不存在的显示器亮度备份：\(described)"
+                        let retirement = "离线亮度目标已留存，重接后补恢复：\(described)"
                         lastRecoveryWarning = [lastRecoveryWarning, retirement]
                             .compactMap { $0 }.joined(separator: "; ")
+                    }
+                    let pending = report.retired + report.deferred
+                    if isDeferred {
+                        let completed = Set(report.observed.map(\.displayID))
+                        let remaining = complete.displays.filter { saved in
+                            guard let id = try? BrightnessRestoration.target(for: saved, active: active) else { return true }
+                            return !completed.contains(id)
+                        }
+                        if !remaining.isEmpty {
+                            try BrightnessBackupStore.write(BrightnessBackup(ownerPID: complete.ownerPID,
+                                createdAt: complete.createdAt, displays: remaining), to: claimed)
+                            continue
+                        }
+                    } else {
+                        try DeferredRecovery.saveBrightness(backup, pending: pending, source: claimed, original: original)
                     }
                 } catch {
                     recordAudit(backup: backup, observed: nil, drift: [], client: client, error: error)
@@ -95,7 +128,9 @@ final class BrightnessController {
                 try FileManager.default.removeItem(at: claimed)
             } catch {
                 firstError = firstError ?? error
-                try? BrightnessBackupStore.relinquish(claimed, to: original)
+                if !DeferredRecovery.isDeferred(claimed, for: original) {
+                    try? BrightnessBackupStore.relinquish(claimed, to: original)
+                }
             }
         }
         if let firstError { throw firstError }
@@ -115,12 +150,13 @@ final class BrightnessController {
 
     private func recordAudit(backup: BrightnessBackup, observed: [DisplayBrightness]?,
                              drift: [BrightnessDrift], client: BetterDisplayClient, error: Error?,
-                             retired: [DisplayBrightness] = []) {
+                             retired: [DisplayBrightness] = [], deferred: [DisplayBrightness] = []) {
         struct Audit: Encodable {
             let before: BrightnessBackup
             let after: [DisplayBrightness]
             let drift: [BrightnessDrift]
             let retired: [DisplayBrightness]?
+            let deferred: [DisplayBrightness]?
             let warning: String?
             let error: String?
         }
@@ -141,10 +177,12 @@ final class BrightnessController {
         }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
-        let retirement = retired.isEmpty ? nil
-            : "已退役不存在的显示器亮度备份：\(retired.map { $0.uuid ?? String($0.displayID) }.sorted().joined(separator: ", "))"
+        let offline = retired + deferred
+        let retirement = offline.isEmpty ? nil
+            : "离线亮度目标已留存，重接后补恢复：\(offline.map { $0.uuid ?? String($0.displayID) }.sorted().joined(separator: ", "))"
         let audit = Audit(before: backup, after: after, drift: drift,
             retired: retired.isEmpty ? nil : retired,
+            deferred: deferred.isEmpty ? nil : deferred,
             warning: [Self.driftWarning(drift), retirement].compactMap { $0 }.joined(separator: "; "),
             error: error?.localizedDescription)
         if let data = try? encoder.encode(audit) {
@@ -159,7 +197,7 @@ final class BrightnessController {
         guard FileManager.default.fileExists(atPath: original.path) else {
             throw BrightnessControllerError.unrestoredBackup
         }
-        let client = try BetterDisplayClient()
+        let client = try clientFactory()
         let existing = try BrightnessBackupStore.read(from: original)
         // Disconnected saved displays remain in BetterDisplay's inventory but
         // cannot accept brightness queries. Reconcile only live display links.

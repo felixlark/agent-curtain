@@ -5,6 +5,7 @@ final class WindowSessionController {
     private let paths: CurtainPaths
     private let captureOperation: () throws -> WindowSessionBackup
     private let restoreOperation: (WindowSessionBackup, Set<String>) throws -> WindowRestorationReport
+    private let activeDisplayUUIDs: () -> Set<String>
     private(set) var recoveryWarning: String?
     private(set) var lastCapturedCount = 0
     private(set) var lastRestoredCount = 0
@@ -16,11 +17,13 @@ final class WindowSessionController {
         },
         restoreOperation: @escaping (WindowSessionBackup, Set<String>) throws -> WindowRestorationReport = {
             try WindowSessionOperations.restore($0, retiredDisplays: $1)
-        }
+        },
+        activeDisplayUUIDs: @escaping () -> Set<String> = { WindowSessionOperations.activeDisplayUUIDs }
     ) {
         self.paths = paths
         self.captureOperation = captureOperation
         self.restoreOperation = restoreOperation
+        self.activeDisplayUUIDs = activeDisplayUUIDs
     }
 
     func capture() throws -> Int {
@@ -52,13 +55,23 @@ final class WindowSessionController {
             in: paths.stateDirectory,
             prefix: "window-session.json.restoring."
         ))
+        let deferred = try DeferredRecovery.candidates(for: original)
+        let active = activeDisplayUUIDs()
+        candidates.insert(contentsOf: try deferred.filter {
+            try WindowSessionBackupStore.read(from: $0).windows.contains { active.contains($0.displayUUID) }
+        }, at: 0)
 
         guard !candidates.isEmpty else { return nil }
         var combined: WindowRestorationReport?
         var firstError: Error?
         for claimed in RecoveryClaimFiles.unique(candidates) {
             do {
-                let backup = try WindowSessionBackupStore.read(from: claimed)
+                let complete = try WindowSessionBackupStore.read(from: claimed)
+                let isDeferred = DeferredRecovery.isDeferred(claimed, for: original)
+                let backup = WindowSessionBackup(ownerPID: complete.ownerPID, createdAt: complete.createdAt,
+                    displays: complete.displays, windows: complete.windows.filter {
+                        !isDeferred || active.contains($0.displayUUID)
+                    })
                 var report: WindowRestorationReport?
                 var operationError: Error?
                 defer { recordAudit(before: backup, report: report, error: operationError) }
@@ -67,16 +80,24 @@ final class WindowSessionController {
                 let result = report!
                 lastRestoredCount = result.restored
                 if !result.retiredWindows.isEmpty {
-                    _ = try? RecoveryArchive.preserve(claimed, reason: "retired-display-windows")
+                    let offline = Set(result.retiredWindows.map(\.displayUUID))
+                    if !isDeferred {
+                        try DeferredRecovery.saveWindows(backup,
+                            pending: backup.windows.filter { offline.contains($0.displayUUID) },
+                            source: claimed, original: original)
+                    }
                     let described = result.retiredWindows.map(\.description).joined(separator: "; ")
-                    recoveryWarning = [recoveryWarning, "已退役不存在显示器上的窗口：\(described)"]
+                    recoveryWarning = [recoveryWarning, "离线窗口目标已留存，重接后补恢复：\(described)"]
                         .compactMap { $0 }.joined(separator: "; ")
                 }
                 if !result.failures.isEmpty {
                     // Retire completed targets before returning the partial failure.
                     // The original timestamp still protects against PID reuse.
                     let pending = WindowSessionBackup(ownerPID: backup.ownerPID,
-                        createdAt: backup.createdAt, displays: backup.displays, windows: result.remaining)
+                        createdAt: backup.createdAt, displays: backup.displays,
+                        windows: (isDeferred ? complete.windows.filter {
+                            !active.contains($0.displayUUID) || Set(result.retiredWindows.map(\.displayUUID)).contains($0.displayUUID)
+                        } : []) + result.remaining)
                     try WindowSessionBackupStore.write(pending, to: claimed)
                     let error = WindowSessionError.restoreFailures(result.failures)
                     operationError = error
@@ -93,10 +114,23 @@ final class WindowSessionController {
                     recoveryWarning = "窗口已恢复但被应用夹取（\(result.deviations.count) 个）：" +
                         result.deviations.joined(separator: "; ")
                 }
+                if isDeferred {
+                    let deferredDisplays = Set(result.retiredWindows.map(\.displayUUID))
+                    let remaining = complete.windows.filter {
+                        !active.contains($0.displayUUID) || deferredDisplays.contains($0.displayUUID)
+                    }
+                    if !remaining.isEmpty {
+                        try WindowSessionBackupStore.write(WindowSessionBackup(ownerPID: complete.ownerPID,
+                            createdAt: complete.createdAt, displays: complete.displays, windows: remaining), to: claimed)
+                        continue
+                    }
+                }
                 try FileManager.default.removeItem(at: claimed)
             } catch {
                 firstError = firstError ?? error
-                try? WindowSessionBackupStore.relinquish(claimed, to: original)
+                if !DeferredRecovery.isDeferred(claimed, for: original) {
+                    try? WindowSessionBackupStore.relinquish(claimed, to: original)
+                }
             }
         }
         if let firstError { throw firstError }

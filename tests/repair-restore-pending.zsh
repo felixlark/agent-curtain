@@ -44,6 +44,36 @@ python3 "$root/tests/fixtures/fake-control-socket.py" "$state/control.sock" open
 socket_pid=$!
 for _ in {1..50}; do [[ -S "$state/control.sock" ]] && break; sleep 0.1; done
 
+PATH="$fixture/bin:$PATH" python3 "$root/script/repair-restore-pending.py" --home "$fixture" --dry-run \
+  > "$fixture/dry-run.log" 2>&1
+python3 - "$state" <<'PY'
+import pathlib, sys
+state = pathlib.Path(sys.argv[1])
+assert {path.name for path in state.iterdir()} == {
+    'control.sock', 'display-session.json', 'brightness.json', 'window-session.json'}
+PY
+
+python3 - "$state" "$fixture" <<'PY' &
+import fcntl, pathlib, sys, time
+state, root = map(pathlib.Path, sys.argv[1:])
+with (state / 'recovery.lock').open('w') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    (root / 'locked').touch()
+    while not (root / 'unlock').exists():
+        time.sleep(0.02)
+PY
+lock_pid=$!
+for _ in {1..50}; do [[ -e "$fixture/locked" ]] && break; sleep 0.1; done
+if PATH="$fixture/bin:$PATH" python3 "$root/script/repair-restore-pending.py" --home "$fixture" \
+  > "$fixture/locked.log" 2>&1; then
+  touch "$fixture/unlock"
+  wait "$lock_pid"
+  exit 1
+fi
+grep -q 'recovery is already in progress' "$fixture/locked.log"
+touch "$fixture/unlock"
+wait "$lock_pid"
+
 PATH="$fixture/bin:$PATH" python3 "$root/script/repair-restore-pending.py" --home "$fixture" \
   > "$fixture/repair.log" 2>&1 || { cat "$fixture/repair.log"; exit 1; }
 
@@ -70,6 +100,9 @@ brightness = json.load(open(state + "/brightness.json"))
 assert [d["uuid"] for d in brightness["displays"]] == uuids
 windows = json.load(open(state + "/window-session.json"))
 assert [w["applicationName"] for w in windows["windows"]] == ["A"]
+deferred = glob.glob(state + "/display-session.deferred.*.json")
+assert len(deferred) == 1
+assert [d['uuid'] for d in json.load(open(deferred[0]))['displays']] == ['gone-a', 'gone-b']
 PY
 # 3. An audit copy of each original is kept.
 ls "$state"/display-session.retired-unavailable-displays-*.json >/dev/null || fail "missing display audit"

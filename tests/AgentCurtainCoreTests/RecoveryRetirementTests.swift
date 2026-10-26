@@ -110,6 +110,23 @@ import Testing
         _ = succeeding
     }
 
+    @Test func archivedClaimsDoNotBlockTheNextSession() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let paths = CurtainPaths(home: home)
+        try paths.prepareDirectories()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let claim = paths.stateDirectory.appendingPathComponent("display-session.json.restoring.\(getpid())")
+        try Data().write(to: claim)
+        #expect(RecoveryClaimFiles.hasPendingSnapshot(active: paths.displaySessionBackup,
+            claimPrefix: "display-session.json.restoring.", in: paths.stateDirectory))
+        _ = try RecoveryArchive.preserve(claim, reason: "deferred-displays")
+        try FileManager.default.removeItem(at: claim)
+        #expect(!RecoveryClaimFiles.hasPendingSnapshot(active: paths.displaySessionBackup,
+            claimPrefix: "display-session.json.restoring.", in: paths.stateDirectory))
+        #expect(RecoveryClaimFiles.recoverable(in: paths.stateDirectory,
+            prefix: "display-session.json.restoring.").isEmpty)
+    }
+
     @Test func exhaustedConfigurationDegradesToAUsableWarning() throws {
         let fixture = try DisplayFixture()
         defer { fixture.remove() }
@@ -126,9 +143,62 @@ import Testing
                 client: client,
                 configureDisplayEnabled: { _, _, _ in .success },
                 activeDisplayIDs: { [1] }),
-            configurationAttempts: 2)
+            configurationAttempts: 2, layout: { _, _, _ in })
         #expect(report.retired == ["gone"])
         #expect(report.restored == ["internal"])
+    }
+
+    @Test func reconnect1001IsBoundedAndOriginalTargetsAreDeferred() throws {
+        let fixture = try DisplayFixture()
+        defer { fixture.remove() }
+        let client = try fixture.client()
+        let backup = DisplaySessionBackup(ownerPID: 7, connectionBackend: .systemSPI, displays: [
+            DisplayTopology(uuid: "internal", displayID: 1, isBuiltin: true, wasMain: true,
+                placement: "0x0", resolution: "1512x982", rotation: "0")
+        ])
+        let backend = RejectedReconnectBackend(error: .configuration("complete returned 1001"))
+        let report = try DisplaySessionOperations.restoreAvailable(backup, client: client,
+            backend: backend, configurationAttempts: 2, layout: { _, _, _ in
+                Issue.record("layout cannot run after a failed reconnect")
+            })
+        #expect(backend.attempts == 2)
+        #expect(report.restored.isEmpty)
+        #expect(report.deferred == ["internal"])
+        #expect(report.warnings.count == 1)
+    }
+
+    @Test func nonRetryableReconnectErrorRetainsFailure() throws {
+        let fixture = try DisplayFixture()
+        defer { fixture.remove() }
+        let client = try fixture.client()
+        let backup = DisplaySessionBackup(ownerPID: 7, displays: [
+            DisplayTopology(uuid: "internal", displayID: 1, isBuiltin: true, wasMain: true,
+                placement: "0x0", resolution: "1512x982", rotation: "0")
+        ])
+        let backend = RejectedReconnectBackend(error: .configuration("begin returned 1001"))
+        #expect(throws: DisplayConnectionBackendError.self) {
+            try DisplaySessionOperations.restoreAvailable(backup, client: client, backend: backend,
+                layout: { _, _, _ in Issue.record("unexpected layout") })
+        }
+        #expect(backend.attempts == 1)
+    }
+
+    @Test func exhaustedLayoutDoesNotSwallowModeFailure() throws {
+        let fixture = try DisplayFixture()
+        defer { fixture.remove() }
+        let source = try String(contentsOf: fixture.cli, encoding: .utf8)
+            .replacingOccurrences(of: "echo 1512x982", with: "exit 23")
+        try source.write(to: fixture.cli, atomically: false, encoding: .utf8)
+        let backup = DisplaySessionBackup(ownerPID: 7, displays: [
+            DisplayTopology(uuid: "internal", displayID: 1, isBuiltin: true, wasMain: true,
+                placement: "0x0", resolution: "1512x982", rotation: "0")
+        ])
+        #expect(throws: BetterDisplayError.self) {
+            try DisplaySessionOperations.restoreAvailable(backup, client: fixture.client(),
+                backend: RejectedReconnectBackend(error: nil), layout: { _, _, _ in
+                    throw DisplayConnectionBackendError.configuration("complete returned 1001")
+                })
+        }
     }
 
     @Test func tinyReadbackGapIsNoiseButADimmedDisplayStillFails() throws {
@@ -192,6 +262,22 @@ import Testing
         #expect(result.retired.map(\.windowID) == [9])
         #expect(result.stillPending.map(\.windowID) == [10])
     }
+}
+
+private final class RejectedReconnectBackend: DisplayConnectionBackend, @unchecked Sendable {
+    let kind: DisplayConnectionBackendKind = .systemSPI
+    let error: DisplayConnectionBackendError?
+    var attempts = 0
+
+    init(error: DisplayConnectionBackendError?) { self.error = error }
+
+    func reconnectDisplays(backup: DisplaySessionBackup) throws {
+        attempts += 1
+        if let error { throw error }
+    }
+
+    func disconnect(displays: [DisplayTopology], backup: DisplaySessionBackup,
+                    isCancelled: @Sendable () -> Bool) throws {}
 }
 
 private final class DisplayFixture: @unchecked Sendable {

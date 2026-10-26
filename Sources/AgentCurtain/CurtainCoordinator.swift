@@ -1,4 +1,5 @@
 import AgentCurtainCore
+import AppKit
 import Foundation
 
 final class CurtainCoordinator {
@@ -23,6 +24,7 @@ final class CurtainCoordinator {
     private var drawCancellation: CurtainCancellation?
     private var screenReconcileWorkItem: DispatchWorkItem?
     private var screenReconcileCancellation: CurtainCancellation?
+    private var screenObserver: NSObjectProtocol?
     private var pendingOpenCompletions: [(ControlResponse) -> Void] = []
 
     private(set) var phase: Phase = .starting
@@ -49,6 +51,13 @@ final class CurtainCoordinator {
         expectation = CurtainExpectation(paths: paths)
         blocker.onReleaseHotkey = { [weak self] in self?.open(completion: { _ in }) }
         banners.onScreensChanged = { [weak self] in self?.screensChanged() }
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.screensChanged() }
+    }
+
+    deinit {
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
     }
 
     func prepare(completion: @escaping () -> Void) {
@@ -213,7 +222,7 @@ final class CurtainCoordinator {
             do { try InjectionMarkerStore.clear(at: paths.injectionMarker) }
             catch { markerClearError = error }
         }
-        if phase == .open && lastError == nil {
+        if phase == .open && lastError == nil && !hasDeferredRecovery {
             if let markerClearError {
                 completion(ControlResponse(ok: false, state: phase.rawValue,
                     error: "cannot clear injection marker: \(markerClearError.localizedDescription)"))
@@ -439,6 +448,16 @@ final class CurtainCoordinator {
     }
 
     private func screensChanged() {
+        if phase == .open && hasDeferredRecovery {
+            screenReconcileWorkItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.phase == .open else { return }
+                self.open(completion: { _ in })
+            }
+            screenReconcileWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+            return
+        }
         guard phase == .drawn else { return }
         screenReconcileWorkItem?.cancel()
         screenReconcileCancellation?.cancel()
@@ -469,6 +488,12 @@ final class CurtainCoordinator {
         }
         screenReconcileWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+    }
+
+    private var hasDeferredRecovery: Bool {
+        [paths.displaySessionBackup, paths.brightnessBackup, paths.windowSessionBackup].contains {
+            !((try? DeferredRecovery.candidates(for: $0)) ?? []).isEmpty
+        }
     }
 
     private func changed() {

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import datetime as dt
+import fcntl
 import json
 import os
 import shutil
@@ -35,6 +36,7 @@ import socket
 import stat
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 STATE_FILES = [
@@ -97,6 +99,8 @@ def betterdisplay_uuids() -> set[str]:
     except (OSError, subprocess.SubprocessError) as error:
         fail(f"betterdisplaycli could not be read: {error}")
     text = result.stdout.strip()
+    if result.returncode != 0:
+        fail(f"betterdisplaycli failed with exit {result.returncode}")
     if not text:
         fail("betterdisplaycli returned no displays; is BetterDisplay.app running?")
     if not text.startswith("["):
@@ -105,7 +109,13 @@ def betterdisplay_uuids() -> set[str]:
         entries = json.loads(text)
     except ValueError as error:
         fail(f"betterdisplaycli returned unparsable output: {error}")
-    return {entry["UUID"] for entry in entries if entry.get("UUID")}
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        fail("betterdisplaycli returned an invalid display list")
+    identities = {entry["UUID"] for entry in entries
+                  if isinstance(entry.get("UUID"), str) and entry["UUID"] not in ("", "UNKNOWN")}
+    if not identities:
+        fail("betterdisplaycli returned no stable display identities")
+    return identities
 
 
 def active_display_ids() -> set[int]:
@@ -200,6 +210,10 @@ def retire_entries(state: Path, name: str, key: str, identity: Identity,
     log(f"{name}: {len(entries)} saved, {len(removed)} to retire")
     if removed and not dry_run:
         log(f"  audit copy: {archive(path, reason).name}")
+        deferred = dict(payload)
+        deferred[key] = removed
+        destination = path.with_name(f"{path.stem}.deferred.{uuid.uuid4()}{path.suffix}")
+        write_private(destination, deferred)
         payload[key] = kept
         write_private(path, payload)
     return len(removed)
@@ -218,6 +232,19 @@ def main() -> int:
     if stat.S_IMODE(state.stat().st_mode) & 0o077:
         fail(f"{state} is not mode 0700")
 
+    if arguments.dry_run:
+        return repair(state, arguments)
+    descriptor = os.open(state / "recovery.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(descriptor, "r+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail("recovery is already in progress")
+        return repair(state, arguments)
+
+
+def repair(state: Path, arguments: argparse.Namespace) -> int:
+
     before = status_via_socket(state / "control.sock")
     if before is None:
         fail("the control socket did not answer status; start AgentCurtain first")
@@ -229,11 +256,11 @@ def main() -> int:
     log(f"known display UUIDs: {len(identity.inventory_uuids)}; "
         f"active display IDs: {sorted(identity.active_ids)}")
 
-    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     directory = None if arguments.dry_run else state / f"backup-{stamp}"
     if directory is not None:
         directory.mkdir(mode=0o700)
-    saved = backup([state / name for name in STATE_FILES], stamp, directory)
+    saved = 0 if arguments.dry_run else backup([state / name for name in STATE_FILES], stamp, directory)
     log(f"backups written: {saved}{' (dry run, not written)' if arguments.dry_run else ''}")
 
     retired = {}

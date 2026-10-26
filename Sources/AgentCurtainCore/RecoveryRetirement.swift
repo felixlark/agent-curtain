@@ -54,7 +54,7 @@ public enum RecoveryRetirement {
     }
 
     public static func describeUnavailable(_ uuids: [String]) -> String {
-        "saved displays are no longer present and were retired: \(uuids.sorted().joined(separator: ", "))"
+        "offline display targets were deferred until reconnection: \(uuids.sorted().joined(separator: ", "))"
     }
 }
 
@@ -68,14 +68,16 @@ public struct DisplayRestoreReport: Equatable, Sendable {
     public let retired: [String]
     /// Non-fatal shortfalls: layout abandoned after retries, mode readback, etc.
     public let warnings: [String]
+    public let deferred: [String]
 
-    public init(restored: [String] = [], retired: [String] = [], warnings: [String] = []) {
+    public init(restored: [String] = [], retired: [String] = [], warnings: [String] = [], deferred: [String] = []) {
         self.restored = restored
         self.retired = retired
         self.warnings = warnings
+        self.deferred = deferred
     }
 
-    public var isFullyRestored: Bool { retired.isEmpty && warnings.isEmpty }
+    public var isFullyRestored: Bool { retired.isEmpty && deferred.isEmpty && warnings.isEmpty }
 }
 
 /// A saved window that was dropped because its display was retired. Reported in

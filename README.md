@@ -156,17 +156,21 @@ the app retries any orphaned restore record.
 Display-change notifications rebuild banners and reconcile newly attached
 display IDs into the brightness backup before dimming them.
 
-A saved display can outlive its hardware: a monitor is unplugged, or macOS
-renumbers the topology. Such a UUID is never submitted to WindowServer — that is
-the `complete returned 1001` loop that used to pin `restore-pending` forever.
-Displays the system still knows about stay in the snapshot (including ones the
-curtain itself disconnected, so a hot-plug still restores them); displays it no
-longer reports are retired with an audit copy `*.retired-unavailable-displays-*`
-and a warning. Windows saved on a retired display are retired the same way, and a
-layout transaction that keeps returning `1001` is retried a bounded number of
-times and then abandoned with a warning, so `curtain on` and `curtain off` stay
-usable. Brightness readback tolerates a 0.02 gap (0.741 vs 0.73 is quantization,
-not a failed restore).
+Display recovery checks saved UUIDs against BetterDisplay's inventory and the
+active set before writing. Missing targets leave the live recovery snapshot so
+they cannot block a new curtain session. Their original topology, brightness and
+window records remain in mode-0600 `*.deferred.*.json` files alongside immutable
+audit copies. Screen changes while open retry only reconnected targets by UUID;
+successful recovery consumes those deferred entries, while offline targets remain
+available for a later hot-plug. Window records retain their original timestamps
+to protect against PID reuse.
+
+A transaction returning `complete returned 1001` is retried at most three times.
+After exhaustion the original target is deferred with a warning. Other errors,
+including mode failures after a layout rejection, remain failures and retain the
+recovery snapshot. New sessions preserve unresolved topology rather than replacing
+it with the failed layout. Brightness and component readback share a 0.02 tolerance
+(0.741 vs 0.73 is quantization, not a failed restore).
 
 If an existing state directory is already stuck, repair it without losing
 evidence:

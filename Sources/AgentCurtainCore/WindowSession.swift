@@ -443,6 +443,10 @@ public enum WindowSessionError: Error, LocalizedError {
 }
 
 public enum WindowSessionOperations {
+    public static var activeDisplayUUIDs: Set<String> {
+        Set(activeDisplayGeometries().map(\.uuid))
+    }
+
     public static func capture(ownerPID: Int32, excludingBundleIdentifier: String? = nil) throws -> WindowSessionBackup {
         guard AXIsProcessTrusted() else { throw WindowSessionError.accessibilityPermission }
         let displays = activeDisplayGeometries()
@@ -513,21 +517,17 @@ public enum WindowSessionOperations {
                 subrole: $0.subrole, hasScreenWindow: $0.windowID != nil)
         }
         let excluded = backup.windows.count - managed.count
-        let selection = WindowApplicationSelection.resolve(managed) {
+        let offline = Set(managed.map(\.displayUUID)).subtracting(activeDisplayUUIDs)
+        let deferred = WindowSessionPlanner.retireStrandedWindows(managed,
+            retiredDisplays: offline.union(retiredDisplays.subtracting(activeDisplayUUIDs)))
+        let selection = WindowApplicationSelection.resolve(deferred.stillPending) {
             try runningApplication(for: ApplicationIdentity($0), capturedAt: backup.createdAt) != nil
         }
         var surviving = selection.surviving
         var disappeared = selection.disappeared
         var unresolved = selection.failures
         var unmatched = selection.remaining
-        var retiredWindows: [RetiredWindow] = []
-        if !retiredDisplays.isEmpty {
-            let retirement = WindowSessionPlanner.retireStrandedWindows(
-                surviving.filter { retiredDisplays.contains($0.displayUUID) },
-                retiredDisplays: retiredDisplays)
-            retiredWindows.append(contentsOf: retirement.retired)
-            surviving.removeAll { retiredDisplays.contains($0.displayUUID) }
-        }
+        var retiredWindows = deferred.retired
         let neededUUIDs = Set(surviving.map(\.displayUUID))
         let displays = waitForDisplays(neededUUIDs: neededUUIDs)
         let missing = neededUUIDs.subtracting(displays.keys).sorted()
@@ -538,8 +538,8 @@ public enum WindowSessionOperations {
             let partition = WindowSessionPlanner.partitionRestoreTargets(
                 surviving, availableUUIDs: Set(displays.keys))
             surviving = partition.restorable
-            unmatched.append(contentsOf: partition.stranded)
-            unresolved.append("displays not restored: \(missing.joined(separator: ", "))")
+            retiredWindows.append(contentsOf: WindowSessionPlanner.retireStrandedWindows(
+                partition.stranded, retiredDisplays: Set(missing)).retired)
         }
         if surviving.isEmpty {
             return WindowRestorationReport(saved: backup.windows.count, restored: 0,

@@ -253,7 +253,7 @@ public enum DisplaySessionOperations {
         client: BetterDisplayClient,
         backend: any DisplayConnectionBackend
     ) throws {
-        try restoreLayoutAndModes(backup, client: client, backend: backend, attempts: 3)
+        _ = try restoreLayoutAndModes(backup, client: client, backend: backend, attempts: 3)
     }
 
     /// Restore only the displays the system still reports, and retire the rest.
@@ -271,7 +271,8 @@ public enum DisplaySessionOperations {
         _ backup: DisplaySessionBackup,
         client: BetterDisplayClient,
         backend: any DisplayConnectionBackend,
-        configurationAttempts: Int = 3
+        configurationAttempts: Int = 3,
+        layout: ((DisplaySessionBackup, BetterDisplayClient, Int) throws -> Void)? = nil
     ) throws -> DisplayRestoreReport {
         let saved = backup.displays
         let inventory = Set(try client.displays().compactMap(\.uuid))
@@ -287,42 +288,56 @@ public enum DisplaySessionOperations {
 
         let scoped = DisplaySessionBackup(ownerPID: backup.ownerPID, createdAt: backup.createdAt,
             connectionBackend: backup.connectionBackend, displays: available)
-        do {
-            try restoreLayoutAndModes(scoped, client: client, backend: backend,
-                attempts: configurationAttempts)
-        } catch {
-            // The backend already retried. Abandoning the layout keeps the displays
-            // connected and the curtain usable; the shortfall is reported, not hidden.
-            guard isAbandonableConfigurationFailure(error) else { throw error }
-            return DisplayRestoreReport(retired: unavailable.map(\.uuid),
-                warnings: ["display layout abandoned after \(max(1, configurationAttempts)) attempts: \(error.localizedDescription)"])
-        }
-        return DisplayRestoreReport(restored: available.map(\.uuid), retired: unavailable.map(\.uuid))
+        let warnings = try restoreLayoutAndModes(scoped, client: client, backend: backend,
+            attempts: configurationAttempts, layout: layout)
+        return DisplayRestoreReport(restored: warnings.isEmpty ? available.map(\.uuid) : [],
+            retired: unavailable.map(\.uuid), warnings: warnings,
+            deferred: warnings.isEmpty ? [] : available.map(\.uuid))
     }
 
     /// A WindowServer transaction that keeps refusing cannot be fixed by retrying
     /// forever; it must degrade to an audited warning.
     static func isAbandonableConfigurationFailure(_ error: Error) -> Bool {
-        switch error {
-        case DisplayConnectionBackendError.configuration: return true
-        case BetterDisplayError.commandFailed(let message):
-            return message.contains("complete returned") || message.contains("layout readback")
-        default: return false
-        }
+        isRetryable(error)
     }
 
     private static func restoreLayoutAndModes(
         _ backup: DisplaySessionBackup,
         client: BetterDisplayClient,
         backend: any DisplayConnectionBackend,
-        attempts: Int
-    ) throws {
-        try backend.reconnectDisplays(backup: backup)
+        attempts: Int,
+        layout: ((DisplaySessionBackup, BetterDisplayClient, Int) throws -> Void)? = nil
+    ) throws -> [String] {
+        var warnings: [String] = []
+        for attempt in 0..<max(1, attempts) {
+            do {
+                try backend.reconnectDisplays(backup: backup)
+                break
+            } catch {
+                if case DisplayConnectionBackendError.verification = error {
+                    return ["display reconnect deferred: \(error.localizedDescription)"]
+                }
+                guard isRetryable(error) else { throw error }
+                if attempt + 1 == max(1, attempts) {
+                    return ["display reconnect deferred after \(max(1, attempts)) attempts: \(error.localizedDescription)"]
+                }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        }
 
         var failures: [String] = []
         if backend.kind == .systemSPI {
-            do { try restoreLayoutInOneTransaction(backup, client: client, attempts: attempts) }
-            catch { failures.append("layout: \(error.localizedDescription)") }
+            do {
+                if let layout { try layout(backup, client, attempts) }
+                else { try restoreLayoutInOneTransaction(backup, client: client, attempts: attempts) }
+            }
+            catch {
+                if isAbandonableConfigurationFailure(error) {
+                    warnings.append("display layout deferred after \(max(1, attempts)) attempts: \(error.localizedDescription)")
+                } else {
+                    failures.append("layout: \(error.localizedDescription)")
+                }
+            }
         } else {
             if let main = backup.displays.first(where: \.wasMain) {
                 do {
@@ -333,8 +348,6 @@ public enum DisplaySessionOperations {
                 } catch {
                     failures.append("main \(main.uuid): \(error.localizedDescription)")
                 }
-            } else {
-                failures.append(DisplaySessionError.missingMainDisplay.localizedDescription)
             }
 
             for saved in backup.displays {
@@ -361,6 +374,7 @@ public enum DisplaySessionOperations {
         if !failures.isEmpty {
             throw BetterDisplayError.commandFailed(failures.joined(separator: "; "))
         }
+        return warnings
     }
 
     /// Main display and all origins share one WindowServer transaction. Per-screen
@@ -419,8 +433,7 @@ public enum DisplaySessionOperations {
     static func isRetryable(_ error: Error) -> Bool {
         switch error {
         case DisplayConnectionBackendError.configuration(let message):
-            return message.contains("complete returned")
-                || message.contains("begin returned")
+            return message == "complete returned 1001"
         default:
             return false
         }

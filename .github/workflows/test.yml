@@ -1,0 +1,25 @@
+name: Recovery tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, fix/restore-pending-unavailable-displays]
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    name: macOS recovery tests
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Swift tests
+        run: swift test --scratch-path "$RUNNER_TEMP/curtain-swiftpm" --cache-path "$RUNNER_TEMP/curtain-cache"
+      - name: Headless regressions
+        env:
+          CURTAIN_SWIFTPM_SCRATCH_PATH: ${{ runner.temp }}/curtain-swiftpm
+        run: |
+          for suite in coordinator-transitions window-session-recovery deferred-recovery repair-restore-pending sentry watchdog-integration; do
+            zsh "tests/$suite.zsh"
+          done

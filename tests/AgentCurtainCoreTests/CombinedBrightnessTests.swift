@@ -3,6 +3,39 @@ import Testing
 @testable import AgentCurtainCore
 
 @Suite struct CombinedBrightnessTests {
+    @Test func quantizedComponentDoesNotTriggerAnUnnecessaryWrite() throws {
+        let fixture = try CombinedBrightnessFixture(stdout: "0.741\n")
+        defer { fixture.remove() }
+
+        try fixture.client.restoreBrightnessComponent("hardwareBrightness", displayID: 1, value: 0.73)
+
+        #expect(try fixture.arguments() == "get\n-displayID=1\n-hardwareBrightness\n")
+    }
+
+    @Test func componentWriteAcceptsQuantizedReadback() throws {
+        let fixture = try CombinedBrightnessFixture(stdout: "0.1\n")
+        defer { fixture.remove() }
+        try """
+        #!/bin/sh
+        fixture_dir=${0%/*}
+        printf '%s\\n' "$@" >> "$fixture_dir/arguments"
+        if [ "$1" = "set" ]; then echo 0.741; else echo 0.1; fi
+        """.write(to: fixture.root.appendingPathComponent("fake-betterdisplaycli"), atomically: false, encoding: .utf8)
+
+        try fixture.client.restoreBrightnessComponent("hardwareBrightness", displayID: 1, value: 0.73)
+
+        #expect(try fixture.arguments().contains("set\nget\n-displayID=1\n-hardwareBrightness=0.73\n"))
+    }
+
+    @Test func componentWriteStillRejectsLargeMismatch() throws {
+        let fixture = try CombinedBrightnessFixture(stdout: "0.1\n")
+        defer { fixture.remove() }
+
+        #expect(throws: BetterDisplayError.self) {
+            try fixture.client.restoreBrightnessComponent("hardwareBrightness", displayID: 1, value: 0.73)
+        }
+    }
+
     @Test func setsAndReadsOneDisplayWithOneCommand() throws {
         let fixture = try CombinedBrightnessFixture(stdout: " \t0.375\n")
         defer { fixture.remove() }

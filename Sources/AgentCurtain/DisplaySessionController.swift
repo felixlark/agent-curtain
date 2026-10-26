@@ -4,6 +4,8 @@ import Foundation
 
 final class DisplaySessionController {
     private let paths: CurtainPaths
+    private let clientFactory: () throws -> BetterDisplayClient
+    private let restoreOperation: (DisplaySessionBackup, BetterDisplayClient) throws -> DisplayRestoreReport
     private(set) var lastBackendKind: DisplayConnectionBackendKind?
     private(set) var betterDisplayProStatus = "unknown"
     /// Diagnostics from retired or abandoned recovery entries. Never fails an
@@ -18,16 +20,26 @@ final class DisplaySessionController {
         lastRetiredDisplays = []
     }
 
-    init(paths: CurtainPaths) {
+    init(paths: CurtainPaths,
+         clientFactory: @escaping () throws -> BetterDisplayClient = { try BetterDisplayClient() },
+         restoreOperation: @escaping (DisplaySessionBackup, BetterDisplayClient) throws -> DisplayRestoreReport = {
+             try DisplaySessionOperations.restoreAvailable($0, client: $1,
+                 backend: DisplayConnectionBackendFactory.restoreBackend(for: $0, client: $1))
+         }) {
         self.paths = paths
+        self.clientFactory = clientFactory
+        self.restoreOperation = restoreOperation
     }
 
     func capture() throws -> Int {
         try paths.prepareDirectories()
+        let recoveryLock = try RecoveryTransactionLock(url: paths.recoveryLock)
+        defer { withExtendedLifetime(recoveryLock) {} }
         // A snapshot left by an interrupted session is recoverable state, not a
         // reason to refuse a new draw. Recover it first, exactly as startup does.
-        if hasBackup { try? restoreAllDisplays() }
-        let client = try BetterDisplayClient()
+        try restoreAllDisplays()
+        guard !hasBackup else { throw DisplaySessionControllerError.unrestoredBackup }
+        let client = try clientFactory()
         let backend = try DisplayConnectionBackendFactory.select(client: client)
         let captured = try DisplaySessionOperations.capture(
             ownerPID: getpid(),
@@ -38,7 +50,13 @@ final class DisplaySessionController {
         // can restore it. A display the system no longer knows about is retired:
         // keeping it would make every future restore write an impossible identity.
         let inventory = Set(try client.displays().compactMap(\.uuid))
-        let previous = (try? DisplaySessionBackupStore.read(from: paths.displaySessionBackup))?.displays ?? []
+        let allPrevious = try DeferredRecovery.candidates(for: paths.displaySessionBackup).flatMap {
+            try DisplaySessionBackupStore.read(from: $0).displays
+        }
+        var previous: [DisplayTopology] = []
+        for saved in allPrevious where !previous.contains(where: { $0.uuid == saved.uuid }) {
+            previous.append(saved)
+        }
         let capturedUUIDs = Set(captured.displays.map(\.uuid))
         let retained = previous.filter { !capturedUUIDs.contains($0.uuid) && inventory.contains($0.uuid) }
         let retired = previous.filter { !capturedUUIDs.contains($0.uuid) && !inventory.contains($0.uuid) }
@@ -47,14 +65,14 @@ final class DisplaySessionController {
             lastRetiredDisplays.formUnion(retired.map(\.uuid))
         }
         let backup = DisplaySessionBackup(ownerPID: getpid(), connectionBackend: backend.kind,
-            displays: captured.displays + retained)
+            displays: captured.displays.map { current in previous.first { $0.uuid == current.uuid } ?? current } + retained)
         try DisplaySessionBackupStore.write(backup, to: paths.displaySessionBackup)
         lastBackendKind = backend.kind
         return backup.displays.count
     }
 
     func disconnectExternalDisplays(isCancelled: @Sendable () -> Bool = { false }) throws -> Int {
-        let client = try BetterDisplayClient()
+        let client = try clientFactory()
         let saved = try DisplaySessionBackupStore.read(from: paths.displaySessionBackup)
         let backup = DisplaySessionOperations.refreshDisplayIDs(
             in: saved,
@@ -80,7 +98,7 @@ final class DisplaySessionController {
         guard FileManager.default.fileExists(atPath: paths.displaySessionBackup.path) else {
             throw DisplaySessionControllerError.unrestoredBackup
         }
-        let client = try BetterDisplayClient()
+        let client = try clientFactory()
         let existing = try DisplaySessionBackupStore.read(from: paths.displaySessionBackup)
         let updated = try DisplaySessionOperations.mergeNewActiveDisplays(into: existing, client: client)
         if updated != existing {
@@ -103,6 +121,7 @@ final class DisplaySessionController {
     }
 
     func restoreAllDisplays() throws {
+        resetRetirement()
         let original = paths.displaySessionBackup
         var candidates: [URL] = []
         if let claimed = try DisplaySessionBackupStore.claim(original) { candidates.append(claimed) }
@@ -110,28 +129,37 @@ final class DisplaySessionController {
             in: paths.stateDirectory,
             prefix: "display-session.json.restoring."
         ))
+        let deferred = try DeferredRecovery.candidates(for: original)
+        if !deferred.isEmpty {
+            let active = Set(try clientFactory().activeDisplays().compactMap(\.uuid))
+            candidates.insert(contentsOf: try deferred.filter {
+                try DisplaySessionBackupStore.read(from: $0).displays.contains { active.contains($0.uuid) }
+            }, at: 0)
+        }
 
         guard !candidates.isEmpty else { return }
         var firstError: Error?
         for claimed in RecoveryClaimFiles.unique(candidates) {
             do {
-                let client = try BetterDisplayClient()
-                let saved = try DisplaySessionBackupStore.read(from: claimed)
+                let client = try clientFactory()
+                let complete = try DisplaySessionBackupStore.read(from: claimed)
+                let isDeferred = DeferredRecovery.isDeferred(claimed, for: original)
+                let active = isDeferred ? Set(try client.activeDisplays().compactMap(\.uuid)) : nil
+                let saved = DisplaySessionBackup(ownerPID: complete.ownerPID, createdAt: complete.createdAt,
+                    connectionBackend: complete.connectionBackend,
+                    displays: complete.displays.filter { active?.contains($0.uuid) ?? true })
                 let backup = DisplaySessionOperations.refreshDisplayIDs(
                     in: saved,
                     identities: try client.displays()
                 )
-                if backup != saved {
+                if backup != saved && !isDeferred {
                     try DisplaySessionBackupStore.write(backup, to: claimed)
                 }
-                let report = try DisplaySessionOperations.restoreAvailable(
-                    backup, client: client, backend: try DisplayConnectionBackendFactory.restoreBackend(
-                        for: backup, client: client))
+                let report = try restoreOperation(backup, client)
                 lastBackendKind = backup.connectionBackend
                 if !report.retired.isEmpty {
                     // The saved hardware is gone. Keep the evidence and move on: a
                     // permanently pending entry is what made `curtain on` unusable.
-                    _ = try? RecoveryArchive.preserve(claimed, reason: "unavailable-displays")
                     lastRestoreWarning = RecoveryRetirement.describeUnavailable(report.retired)
                     lastRetiredDisplays.formUnion(report.retired)
                 }
@@ -139,10 +167,26 @@ final class DisplaySessionController {
                     lastRestoreWarning = ([lastRestoreWarning] + report.warnings)
                         .compactMap { $0 }.joined(separator: "; ")
                 }
-                try FileManager.default.removeItem(at: claimed)
+                if isDeferred {
+                    let restored = Set(report.restored)
+                    let remaining = complete.displays.filter { !restored.contains($0.uuid) }
+                    if remaining.isEmpty {
+                        try FileManager.default.removeItem(at: claimed)
+                    } else {
+                        try DisplaySessionBackupStore.write(DisplaySessionBackup(ownerPID: complete.ownerPID,
+                            createdAt: complete.createdAt, connectionBackend: complete.connectionBackend,
+                            displays: remaining), to: claimed)
+                    }
+                } else {
+                    try DeferredRecovery.saveDisplays(backup, pending: Set(report.retired + report.deferred),
+                        source: claimed, original: original)
+                    try FileManager.default.removeItem(at: claimed)
+                }
             } catch {
                 firstError = firstError ?? error
-                try? DisplaySessionBackupStore.relinquish(claimed, to: original)
+                if !DeferredRecovery.isDeferred(claimed, for: original) {
+                    try? DisplaySessionBackupStore.relinquish(claimed, to: original)
+                }
             }
         }
         if let firstError { throw firstError }
@@ -154,11 +198,11 @@ final class DisplaySessionController {
     }
 
     func currentActiveDisplayCount() throws -> Int {
-        try BetterDisplayClient().activeDisplays().count
+        try clientFactory().activeDisplays().count
     }
 
     func refreshBackendDiagnostics() {
-        guard let client = try? BetterDisplayClient() else {
+        guard let client = try? clientFactory() else {
             betterDisplayProStatus = "unknown"
             return
         }
