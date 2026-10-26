@@ -156,6 +156,43 @@ the app retries any orphaned restore record.
 Display-change notifications rebuild banners and reconcile newly attached
 display IDs into the brightness backup before dimming them.
 
+Display recovery checks saved UUIDs against BetterDisplay's inventory and the
+active set before writing. Missing targets leave the live recovery snapshot so
+they cannot block a new curtain session. Their original topology, brightness and
+window records remain in mode-0600 `*.deferred.*.json` files alongside immutable
+audit copies. Screen changes while open retry only reconnected targets by UUID;
+successful recovery consumes those deferred entries, while offline targets remain
+available for a later hot-plug. Window records retain their original timestamps
+to protect against PID reuse.
+
+Recovery arbitrates overlapping live and deferred records by target identity:
+the oldest unresolved target wins, and superseded records are archived before
+duplicate replay entries are removed. A still-deferred display layout also keeps
+its original window records deferred. A second display attached during recovery
+gets another pass after the first finishes; unchanged topology does not create a
+retry loop.
+Window arbitration requires a verified process lifetime and a unique WindowServer
+ID; AX ordinals or identifiers alone never justify deleting another source's target.
+
+A transaction returning `complete returned 1001` is retried at most three times.
+After exhaustion the original target is deferred with a warning. Other errors,
+including mode failures after a layout rejection, remain failures and retain the
+recovery snapshot. New sessions preserve unresolved topology rather than replacing
+it with the failed layout. Brightness and component readback share a 0.02 tolerance
+(0.741 vs 0.73 is quantization, not a failed restore).
+
+If an existing state directory is already stuck, repair it without losing
+evidence:
+
+```bash
+python3 script/repair-restore-pending.py --dry-run   # show what would be retired
+python3 script/repair-restore-pending.py             # back up, then retire
+```
+
+The tool refuses to run while the curtain is drawn, copies every file it touches
+to `<name>.bak-<timestamp>` and `backup-<timestamp>/`, and never writes to a
+display, installs anything, or asks for elevated permissions.
+
 AgentCurtain never calls `pmset displaysleepnow`: display sleep stops framebuffer
 composition and blinds GUI agents.
 

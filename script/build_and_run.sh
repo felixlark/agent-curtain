@@ -43,9 +43,16 @@ s=socket.socket(socket.AF_UNIX); s.settimeout(30); s.connect(sys.argv[1]); s.sen
 }
 
 stage_bundle() {
-  swift build -c "$BUILD_CONFIGURATION" --scratch-path "$SWIFTPM_SCRATCH_PATH"
+  # SwiftPM wraps every build in its own sandbox. Inside a managed agent session
+  # that sandbox cannot be applied, so allow an explicit opt-out there.
+  local -a swift_build=(swift build -c "$BUILD_CONFIGURATION" --scratch-path "$SWIFTPM_SCRATCH_PATH")
+  if [[ "${CURTAIN_SWIFTPM_DISABLE_SANDBOX:-0}" == 1 ]]; then
+    swift_build+=(--disable-sandbox --cache-path "$SWIFTPM_SCRATCH_PATH/cache"
+      --config-path "$SWIFTPM_SCRATCH_PATH/config" --security-path "$SWIFTPM_SCRATCH_PATH/security")
+  fi
+  "${swift_build[@]}"
   local bin_dir
-  bin_dir="$(swift build -c "$BUILD_CONFIGURATION" --scratch-path "$SWIFTPM_SCRATCH_PATH" --show-bin-path)"
+  bin_dir="$("${swift_build[@]}" --show-bin-path)"
 
   rm -rf "$APP_BUNDLE"
   mkdir -p "$APP_MACOS"
@@ -211,6 +218,7 @@ case "$MODE" in
     zsh "$ROOT_DIR/tests/banner-layout.zsh"
     zsh "$ROOT_DIR/tests/coordinator-transitions.zsh"
     zsh "$ROOT_DIR/tests/window-session-recovery.zsh"
+    zsh "$ROOT_DIR/tests/repair-restore-pending.zsh"
     CURTAIN_SWIFTPM_SCRATCH_PATH="$SWIFTPM_SCRATCH_PATH" "$ROOT_DIR/tests/watchdog-integration.zsh"
     swiftc -typecheck -parse-as-library "$ROOT_DIR/script/verify_banner_framebuffer.swift" \
       -framework CoreGraphics \

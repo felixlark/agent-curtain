@@ -293,11 +293,12 @@ public struct BetterDisplayClient: Sendable {
         return value
     }
 
-    public func restoreBrightnessComponent(_ name: String, displayID: Int, value: Double) throws {
-        guard abs(try brightnessComponent(name, displayID: displayID) - value) > 0.01 else { return }
+    public func restoreBrightnessComponent(_ name: String, displayID: Int, value: Double,
+                                          tolerance: Double = BrightnessRestoration.defaultTolerance) throws {
+        guard abs(try brightnessComponent(name, displayID: displayID) - value) > tolerance else { return }
         let result = try checked(["set", "get", "-displayID=\(displayID)", "-\(name)=\(value)"])
         guard let readback = Double(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)),
-              readback.isFinite, abs(readback - value) <= 0.01 else {
+              readback.isFinite, abs(readback - value) <= tolerance else {
             throw BetterDisplayError.commandFailed("displayID=\(displayID) \(name) readback mismatch")
         }
     }

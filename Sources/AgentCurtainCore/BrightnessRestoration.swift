@@ -38,14 +38,26 @@ public struct BrightnessRestoreReport: Equatable, Sendable {
     public let observed: [DisplayBrightness]
     /// Built-in panels that moved after the settling window closed.
     public let drift: [BrightnessDrift]
+    /// Saved displays the system no longer reports. They were skipped rather than
+    /// written, and their backup entries are retired by the caller.
+    public let retired: [DisplayBrightness]
+    public let deferred: [DisplayBrightness]
 
-    public init(observed: [DisplayBrightness] = [], drift: [BrightnessDrift] = []) {
+    public init(observed: [DisplayBrightness] = [], drift: [BrightnessDrift] = [],
+                retired: [DisplayBrightness] = [], deferred: [DisplayBrightness] = []) {
         self.observed = observed
         self.drift = drift
+        self.retired = retired
+        self.deferred = deferred
     }
 }
 
 public enum BrightnessRestoration {
+    /// Components and the aggregate are read back through a CLI and hardware
+    /// quantization. A 0.011 gap (0.741 vs 0.73) is measurement noise, not a failed
+    /// restore; 0.02 still catches a display left dimmed.
+    public static let defaultTolerance = 0.02
+
     public static func target(for saved: DisplayBrightness, active: [DisplayIdentity]) throws -> Int {
         let matches = active.filter {
             if let uuid = saved.uuid { return $0.uuid == uuid }
@@ -72,7 +84,7 @@ public enum BrightnessRestoration {
         activeInterval: TimeInterval = 0.5,
         settlingPasses: Int = 5,
         settlingInterval: TimeInterval = 0.2,
-        driftTolerance: Double = 0.01
+        driftTolerance: Double = BrightnessRestoration.defaultTolerance
     ) throws -> BrightnessRestoreReport {
         var active = try client.activeDisplays()
         // Wake exposes a display before its link is trained. Waiting cannot make a
@@ -83,11 +95,19 @@ public enum BrightnessRestoration {
             active = try client.activeDisplays()
         }
 
+        // A saved display the system no longer reports can never be written. It is
+        // retired with a warning instead of failing the whole restore forever.
+        let inventory = try client.displays()
+        let missing = backup.displays.filter { (try? target(for: $0, active: active)) == nil }
+        let retired = missing.filter { (try? target(for: $0, active: inventory)) == nil }
+        let deferred = missing.filter { (try? target(for: $0, active: inventory)) != nil }
+        let restorable = backup.displays.filter { (try? target(for: $0, active: active)) != nil }
+
         var failures: [String] = []
         var observed: [DisplayBrightness] = []
         var drift: [BrightnessDrift] = []
         // A missing display must not prevent the remaining screens from recovering.
-        for saved in backup.displays {
+        for saved in restorable {
             do {
                 let id = try target(for: saved, active: active)
                 let isBuiltin = active.first { $0.displayID == id }?.isBuiltin ?? false
@@ -96,10 +116,12 @@ public enum BrightnessRestoration {
                     throw BetterDisplayError.commandFailed("displayID=\(id) brightness \(value), expected \(saved.brightness)")
                 }
                 if let hardware = saved.hardwareBrightness {
-                    try client.restoreBrightnessComponent("hardwareBrightness", displayID: id, value: hardware)
+                    try client.restoreBrightnessComponent("hardwareBrightness", displayID: id, value: hardware,
+                        tolerance: driftTolerance)
                 }
                 if let software = saved.softwareBrightness {
-                    try client.restoreBrightnessComponent("softwareBrightness", displayID: id, value: software)
+                    try client.restoreBrightnessComponent("softwareBrightness", displayID: id, value: software,
+                        tolerance: driftTolerance)
                 }
                 // Component writes can change the aggregate brightness. Verify the
                 // entire tuple after the last write, across a settling interval.
@@ -142,7 +164,7 @@ public enum BrightnessRestoration {
         if !failures.isEmpty {
             throw BetterDisplayError.commandFailed(failures.joined(separator: "; "))
         }
-        return BrightnessRestoreReport(observed: observed, drift: drift)
+        return BrightnessRestoreReport(observed: observed, drift: drift, retired: retired, deferred: deferred)
     }
 
     public static func reconciliationPlan(

@@ -276,6 +276,27 @@ public enum WindowSessionPlanner {
         return (restorable, stranded)
     }
 
+    /// A window whose display was retired can never be placed again. Its record is
+    /// dropped from the pending snapshot and reported, so the remaining windows can
+    /// still be restored and the pending count does not stick.
+    public static func retireStrandedWindows(
+        _ stranded: [SavedWindow],
+        retiredDisplays: Set<String>
+    ) -> (retired: [RetiredWindow], stillPending: [SavedWindow]) {
+        var retired: [RetiredWindow] = []
+        var pending: [SavedWindow] = []
+        for window in stranded {
+            if retiredDisplays.contains(window.displayUUID) {
+                retired.append(RetiredWindow(applicationName: window.applicationName,
+                    windowID: window.windowID, ordinal: window.ordinal,
+                    displayUUID: window.displayUUID))
+            } else {
+                pending.append(window)
+            }
+        }
+        return (retired, pending)
+    }
+
     /// Decide whether a saved window that matched no live candidate is gone.
     /// Window identity is only trustworthy inside the same process. Without a
     /// WindowServer identity there is nothing to look the window up by, so only a
@@ -383,8 +404,13 @@ public struct WindowRestorationReport: Equatable, Sendable {
     /// They are restored (not pending), but the shortfall is recorded rather than
     /// hidden: retrying the same write can never converge.
     public let deviations: [String]
+    /// Windows dropped because their saved display no longer exists. They kept the
+    /// snapshot pending forever, so the shortfall is recorded and retired.
+    public let retiredWindows: [RetiredWindow]
 
-    public init(saved: Int, restored: Int, disappeared: Int, excluded: Int = 0, remaining: [SavedWindow] = [], failures: [String] = [], deviations: [String] = []) {
+    public init(saved: Int, restored: Int, disappeared: Int, excluded: Int = 0,
+                remaining: [SavedWindow] = [], failures: [String] = [],
+                deviations: [String] = [], retiredWindows: [RetiredWindow] = []) {
         self.saved = saved
         self.restored = restored
         self.disappeared = disappeared
@@ -392,6 +418,7 @@ public struct WindowRestorationReport: Equatable, Sendable {
         self.remaining = remaining
         self.failures = failures
         self.deviations = deviations
+        self.retiredWindows = retiredWindows
     }
 }
 
@@ -416,6 +443,12 @@ public enum WindowSessionError: Error, LocalizedError {
 }
 
 public enum WindowSessionOperations {
+    public static func processStartTime(pid: Int32) -> Date? { ProcessStartTime.read(pid: pid) }
+
+    public static var activeDisplayUUIDs: Set<String> {
+        Set(activeDisplayGeometries().map(\.uuid))
+    }
+
     public static func capture(ownerPID: Int32, excludingBundleIdentifier: String? = nil) throws -> WindowSessionBackup {
         guard AXIsProcessTrusted() else { throw WindowSessionError.accessibilityPermission }
         let displays = activeDisplayGeometries()
@@ -468,6 +501,16 @@ public enum WindowSessionOperations {
     }
 
     public static func restore(_ backup: WindowSessionBackup) throws -> WindowRestorationReport {
+        try restore(backup, retiredDisplays: [])
+    }
+
+    /// `retiredDisplays` names saved displays the display-recovery path retired
+    /// because the system no longer reports them. Windows saved on those displays
+    /// can never be placed again, so they are retired too instead of pending.
+    public static func restore(
+        _ backup: WindowSessionBackup,
+        retiredDisplays: Set<String>
+    ) throws -> WindowRestorationReport {
         guard backup.windows.isEmpty || AXIsProcessTrusted() else {
             throw WindowSessionError.accessibilityPermission
         }
@@ -476,13 +519,17 @@ public enum WindowSessionOperations {
                 subrole: $0.subrole, hasScreenWindow: $0.windowID != nil)
         }
         let excluded = backup.windows.count - managed.count
-        let selection = WindowApplicationSelection.resolve(managed) {
+        let offline = Set(managed.map(\.displayUUID)).subtracting(activeDisplayUUIDs)
+        let deferred = WindowSessionPlanner.retireStrandedWindows(managed,
+            retiredDisplays: offline.union(retiredDisplays.subtracting(activeDisplayUUIDs)))
+        let selection = WindowApplicationSelection.resolve(deferred.stillPending) {
             try runningApplication(for: ApplicationIdentity($0), capturedAt: backup.createdAt) != nil
         }
         var surviving = selection.surviving
         var disappeared = selection.disappeared
         var unresolved = selection.failures
         var unmatched = selection.remaining
+        var retiredWindows = deferred.retired
         let neededUUIDs = Set(surviving.map(\.displayUUID))
         let displays = waitForDisplays(neededUUIDs: neededUUIDs)
         let missing = neededUUIDs.subtracting(displays.keys).sorted()
@@ -493,12 +540,13 @@ public enum WindowSessionOperations {
             let partition = WindowSessionPlanner.partitionRestoreTargets(
                 surviving, availableUUIDs: Set(displays.keys))
             surviving = partition.restorable
-            unmatched.append(contentsOf: partition.stranded)
-            unresolved.append("displays not restored: \(missing.joined(separator: ", "))")
+            retiredWindows.append(contentsOf: WindowSessionPlanner.retireStrandedWindows(
+                partition.stranded, retiredDisplays: Set(missing)).retired)
         }
         if surviving.isEmpty {
             return WindowRestorationReport(saved: backup.windows.count, restored: 0,
-                disappeared: disappeared, excluded: excluded, remaining: unmatched, failures: unresolved)
+                disappeared: disappeared, excluded: excluded, remaining: unmatched,
+                failures: unresolved, retiredWindows: retiredWindows)
         }
 
         // WindowServer reports geometry before every application has handled its screen-change
@@ -654,7 +702,8 @@ public enum WindowSessionOperations {
             }
         return WindowRestorationReport(saved: backup.windows.count,
             restored: tasks.count - pendingTasks.count, disappeared: disappeared, excluded: excluded,
-            remaining: unmatched + pendingTasks.map(\.saved), failures: failed, deviations: deviations)
+            remaining: unmatched + pendingTasks.map(\.saved), failures: failed,
+            deviations: deviations, retiredWindows: retiredWindows)
     }
 }
 

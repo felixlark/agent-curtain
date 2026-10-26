@@ -58,6 +58,8 @@ public enum RecoveryClaimFiles {
     public static func hasPendingSnapshot(active: URL, claimPrefix: String, in directory: URL) -> Bool {
         if FileManager.default.fileExists(atPath: active.path) { return true }
         let contents = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-        return contents.contains { $0.hasPrefix(claimPrefix) }
+        return contents.contains {
+            $0.hasPrefix(claimPrefix) && Int32($0.dropFirst(claimPrefix.count)) != nil
+        }
     }
 }

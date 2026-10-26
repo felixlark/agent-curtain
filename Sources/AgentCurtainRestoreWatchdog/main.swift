@@ -74,8 +74,16 @@ do {
                         if backup != saved {
                             try DisplaySessionBackupStore.write(backup, to: claimed)
                         }
-                        let backend = try DisplayConnectionBackendFactory.restoreBackend(for: backup, client: client)
-                        try DisplaySessionOperations.restore(backup, client: client, backend: backend)
+                        // Retire displays the system no longer reports instead of
+                        // writing impossible identifiers; a vanished monitor must not
+                        // leave the watchdog stuck at restore-pending.
+                        let report = try DisplaySessionOperations.restoreAvailable(backup, client: client,
+                            backend: try DisplayConnectionBackendFactory.restoreBackend(for: backup, client: client))
+                        try DeferredRecovery.saveDisplays(backup, pending: Set(report.retired + report.deferred),
+                            source: claimed, original: displaySessionBackupURL)
+                        for warning in report.warnings {
+                            FileHandle.standardError.write(Data((warning + "\n").utf8))
+                        }
                         try FileManager.default.removeItem(at: claimed)
                     } catch {
                         try? DisplaySessionBackupStore.relinquish(claimed, to: displaySessionBackupURL)
@@ -101,7 +109,11 @@ do {
                 for claimed in RecoveryClaimFiles.unique(brightnessCandidates) {
                     do {
                         let backup = try BrightnessBackupStore.read(from: claimed)
-                        _ = try BrightnessRestoration.restore(backup, client: client)
+                        // BrightnessRestoration retires saved displays that are no
+                        // longer present, so one unplugged monitor cannot pin the file.
+                        let report = try BrightnessRestoration.restore(backup, client: client)
+                        try DeferredRecovery.saveBrightness(backup, pending: report.retired + report.deferred,
+                            source: claimed, original: brightnessBackupURL)
                         try FileManager.default.removeItem(at: claimed)
                     } catch {
                         try? BrightnessBackupStore.relinquish(claimed, to: brightnessBackupURL)
@@ -170,9 +182,8 @@ if windowRecoveryPending && appRelaunched {
     let directory = windowSessionBackupURL.deletingLastPathComponent()
     let deadline = Date().addingTimeInterval(15)
     repeat {
-        let claims = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-        let pending = FileManager.default.fileExists(atPath: windowSessionBackupURL.path) ||
-            claims.contains(where: { $0.hasPrefix("window-session.json.restoring.") })
+        let pending = RecoveryClaimFiles.hasPendingSnapshot(active: windowSessionBackupURL,
+            claimPrefix: "window-session.json.restoring.", in: directory)
         if !pending {
             windowRecoveryPending = false
             break

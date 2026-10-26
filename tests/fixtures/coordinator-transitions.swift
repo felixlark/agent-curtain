@@ -1,4 +1,5 @@
 import AgentCurtainCore
+import AppKit
 import Foundation
 
 struct FixtureFailure: Error, LocalizedError {
@@ -48,6 +49,12 @@ final class Scenario {
     var startupBrightnessCalls = 0
     var startupWindowCalls = 0
     var activeCountFails = false
+    var offlineRestorePending = false
+    var savedDisplayOnline = false
+    var retiredDisplays: Set<String> = []
+    var lastWindowRetirement: Set<String> = []
+    var deferredLayouts: Set<String> = []
+    var lastWindowDeferred: Set<String> = []
     // The following observations are accessed only by main-thread fake UI/input APIs.
     var presentations: [BannerController.Presentation] = []
     var starts = 0
@@ -56,6 +63,7 @@ final class Scenario {
     var stops = 0
     var reconciliations = 0
     var screenChange: (() -> Void)?
+    var activeScreenUUIDs: Set<String> = ["internal"]
 }
 
 final class InputBlocker {
@@ -123,17 +131,39 @@ final class DisplaySessionController {
         if scenario.activeCountFails { throw FixtureFailure(message: "fixture active display count failed") }
         return 4
     }
-    func capture() throws -> Int { 4 }
+    func capture() throws -> Int {
+        // The real controller recovers a pending snapshot before capturing a new
+        // draw, so a vanished display is retired at draw time as well.
+        try restoreAllDisplays()
+        return 4
+    }
     func disconnectExternalDisplays(isCancelled: @Sendable () -> Bool = { false }) throws -> Int {
         if isCancelled() { throw CancellationError() }
         return 4
     }
     func reconcileNewDisplays() throws -> Int { 4 }
+    private(set) var lastRestoreWarning: String?
+    var lastRetiredDisplays: Set<String> { scenario.retiredDisplays }
+    func resetRetirement() {
+        lastRestoreWarning = nil
+        scenario.retiredDisplays = []
+    }
     func restoreAllDisplays() throws {
+        resetRetirement()
         scenario.startupDisplayCalls += 1
         if scenario.startupDisplayFails { throw FixtureFailure(message: "startup display failed") }
+        // Offline saved displays are retired after their bounded retry window, so a
+        // vanished monitor can no longer pin restore-pending forever.
+        // Restore is called during prepare (before the scenario is armed) and again
+        // when the test arms a pending display, so retire on every observed pass.
+        if scenario.offlineRestorePending {
+            scenario.offlineRestorePending = false
+            scenario.retiredDisplays = ["gone"]
+            lastRestoreWarning = "saved displays are no longer present and were retired: gone"
+        }
     }
-    var pendingRestoreCount: Int { 0 }
+    var pendingRestoreCount: Int { scenario.offlineRestorePending ? 5 : 0 }
+    func deferredDisplayUUIDs() throws -> Set<String> { scenario.deferredLayouts }
     var displayBackendStatus: String? { "system-spi" }
     var betterDisplayProStatus: String { "off" }
     var privateDisplaySPIStatus: String { "available" }
@@ -146,8 +176,10 @@ final class WindowSessionController {
     var lastCapturedCount = 0
     var lastRestoredCount = 0
     func capture() throws -> Int { 3 }
-    func restoreAllWindows() throws -> WindowRestorationReport? {
+    func restoreAllWindows(retiredDisplays: Set<String>, deferredDisplays: Set<String> = []) throws -> WindowRestorationReport? {
         if !scenario.prepared { scenario.startupWindowCalls += 1 }
+        scenario.lastWindowRetirement = retiredDisplays
+        scenario.lastWindowDeferred = deferredDisplays
         if scenario.windowRestoreFails { throw FixtureFailure(message: "window restoration refused") }
         return nil
     }
@@ -169,7 +201,7 @@ func runScenario(_ name: String, blockerFails: Bool = false, restoreFails: Bool 
     }
     let paths = CurtainPaths(home: temporaryHome)
     scenario.paths = paths
-    let coordinator = CurtainCoordinator(paths: paths)
+    let coordinator = CurtainCoordinator(paths: paths, activeScreenUUIDs: { scenario.activeScreenUUIDs })
     var prepared = false
     coordinator.prepare { prepared = true }
     try pump(until: { prepared }, "prepare \(name)")
@@ -374,6 +406,68 @@ func activeDisplayCountFailureDoesNotFailCompletedRecovery() throws {
     }
 }
 
+func retiredDisplayDoesNotBlockDrawOrLeavePending() throws {
+    try runScenario("retired saved display", body: { coordinator, scenario in
+        scenario.offlineRestorePending = true
+        var drawn: ControlResponse?
+        coordinator.draw { drawn = $0 }
+        try scenario.dim.awaitEntry("draw with a retired display backup")
+        scenario.dim.release.signal()
+        try pump(until: { drawn != nil }, "retired backup draw completion")
+        try require(drawn?.ok == true && coordinator.phase == .drawn,
+            "a retired display restore must not block protection")
+        try require(scenario.retiredDisplays == ["gone"],
+            "the vanished display must be retired during the draw recovery")
+        try require(scenario.lastWindowRetirement == [],
+            "retirement during draw must not leak into a later window restore")
+
+        var opened: ControlResponse?
+        coordinator.open { opened = $0 }
+        try scenario.restore.awaitEntry("restore after retirement")
+        scenario.restore.release.signal()
+        try pump(until: { opened != nil }, "retirement restore completion")
+        try require(opened?.ok == true, "a retired display must leave status ok=true")
+        try require(opened?.restorePending == 0, "no restore-pending entries may remain")
+        try require(opened?.displayMode == "all-displays", "mode must return to all-displays")
+        try require(scenario.lastWindowRetirement.isEmpty,
+            "retirement must not leak into a later restore pass")
+    })
+}
+
+func openScreenChangeRetriesDeferredRecovery() throws {
+    try runScenario("open hot-plug") { coordinator, scenario in
+        let deferred = DeferredRecovery.destination(for: scenario.paths.displaySessionBackup)
+        try Data().write(to: deferred)
+        let before = scenario.startupDisplayCalls
+        scenario.deferredLayouts = ["external"]
+        NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        try scenario.restore.awaitEntry("open hot-plug restore")
+        try require(coordinator.phase == .opening && scenario.startupDisplayCalls == before + 1,
+            "screen changes must debounce into one open recovery without a draw")
+        scenario.activeScreenUUIDs.insert("second-hotplug")
+        NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        scenario.restore.release.signal()
+        try pump(until: { coordinator.phase == .open }, "hot-plug recovery finished")
+        try require(scenario.lastWindowDeferred == ["external"],
+            "unresolved layout UUIDs must be handed to window recovery")
+        scenario.deferredLayouts = []
+        try scenario.restore.awaitEntry("second display connected during opening")
+        try require(scenario.startupDisplayCalls == before + 2,
+            "a display attached during opening gets a new recovery pass")
+        // A notification that changes no display identity must not loop indefinitely.
+        NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        scenario.restore.release.signal()
+        try pump(until: { coordinator.phase == .open }, "second hot-plug recovery finished")
+        let deadline = Date().addingTimeInterval(0.5)
+        while Date() < deadline { _ = RunLoop.main.run(mode: .default, before: deadline) }
+        try require(coordinator.phase == .open && scenario.startupDisplayCalls == before + 2,
+            "unchanged topology must not create an automatic recovery loop")
+        try require(coordinator.lastError == nil && scenario.starts == 0,
+            "hot-plug recovery remains open and never starts the input blocker")
+    }
+}
+
 func markerTransitions() throws {
     try runScenario("marker transitions") { coordinator, scenario in
         let marker = Int64.min + 123
@@ -428,6 +522,8 @@ let cases: [(String, () throws -> Void)] = [
     ("blocker failure with failed rollback drains open/quit", { try rollbackConcurrentRequests(restoreFails: true) }),
     ("open cancels pending screen reconciliation", openingCancelsPendingScreenReconciliation),
     ("active display count failure is a warning", activeDisplayCountFailureDoesNotFailCompletedRecovery),
+    ("retired display permits draw and leaves no restore-pending", retiredDisplayDoesNotBlockDrawOrLeavePending),
+    ("open screen change retries deferred recovery", openScreenChangeRetriesDeferredRecovery),
 ]
 var failures = 0
 for (name, test) in cases {

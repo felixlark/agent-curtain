@@ -1,4 +1,5 @@
 import AgentCurtainCore
+import AppKit
 import Foundation
 
 final class CurtainCoordinator {
@@ -23,6 +24,10 @@ final class CurtainCoordinator {
     private var drawCancellation: CurtainCancellation?
     private var screenReconcileWorkItem: DispatchWorkItem?
     private var screenReconcileCancellation: CurtainCancellation?
+    private var screenObserver: NSObjectProtocol?
+    private let activeScreenUUIDs: () -> Set<String>
+    private var openingScreenUUIDs = Set<String>()
+    private var screenChangedWhileOpening = false
     private var pendingOpenCompletions: [(ControlResponse) -> Void] = []
 
     private(set) var phase: Phase = .starting
@@ -41,14 +46,24 @@ final class CurtainCoordinator {
     }
     var onChange: (() -> Void)?
 
-    init(paths: CurtainPaths) {
+    init(paths: CurtainPaths, activeScreenUUIDs: @escaping () -> Set<String> = {
+        WindowSessionOperations.activeDisplayUUIDs
+    }) {
         self.paths = paths
+        self.activeScreenUUIDs = activeScreenUUIDs
         brightness = BrightnessController(paths: paths)
         displaySession = DisplaySessionController(paths: paths)
         windowSession = WindowSessionController(paths: paths)
         expectation = CurtainExpectation(paths: paths)
         blocker.onReleaseHotkey = { [weak self] in self?.open(completion: { _ in }) }
         banners.onScreensChanged = { [weak self] in self?.screensChanged() }
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.screensChanged() }
+    }
+
+    deinit {
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
     }
 
     func prepare(completion: @escaping () -> Void) {
@@ -213,7 +228,7 @@ final class CurtainCoordinator {
             do { try InjectionMarkerStore.clear(at: paths.injectionMarker) }
             catch { markerClearError = error }
         }
-        if phase == .open && lastError == nil {
+        if phase == .open && lastError == nil && !hasDeferredRecovery {
             if let markerClearError {
                 completion(ControlResponse(ok: false, state: phase.rawValue,
                     error: "cannot clear injection marker: \(markerClearError.localizedDescription)"))
@@ -229,6 +244,8 @@ final class CurtainCoordinator {
         pendingOpenCompletions.append(completion)
         if phase == .opening { return }
 
+        openingScreenUUIDs = activeScreenUUIDs()
+        screenChangedWhileOpening = false
         phase = .opening
         drawCancellation?.cancel()
         drawCancellation = nil
@@ -312,10 +329,17 @@ final class CurtainCoordinator {
             displaysRestored = false
             messages.append("display restore: \(error.localizedDescription)")
         }
+        if let retirement = displaySession.lastRestoreWarning {
+            warnings.append(retirement)
+        }
         do { try brightness.restoreAllDisplays() }
         catch { messages.append("brightness restore: \(error.localizedDescription)") }
         if displaysRestored {
-            do { _ = try windowSession.restoreAllWindows() }
+            // Windows saved on a retired display cannot be placed again. Passing the
+            // retired set lets the window path retire them instead of pending forever.
+            do { _ = try windowSession.restoreAllWindows(
+                retiredDisplays: displaySession.lastRetiredDisplays,
+                deferredDisplays: try displaySession.deferredDisplayUUIDs()) }
             catch { messages.append("window restore: \(error.localizedDescription)") }
         }
         var activeCount: Int?
@@ -360,6 +384,9 @@ final class CurtainCoordinator {
         let callbacks = pendingOpenCompletions
         pendingOpenCompletions.removeAll()
         callbacks.forEach { $0(response) }
+        let needsAnotherPass = screenChangedWhileOpening && activeScreenUUIDs() != openingScreenUUIDs
+        screenChangedWhileOpening = false
+        if needsAnotherPass { screensChanged() }
     }
 
     func reload(completion: @escaping (ControlResponse) -> Void) {
@@ -433,6 +460,20 @@ final class CurtainCoordinator {
     }
 
     private func screensChanged() {
+        if phase == .opening {
+            screenChangedWhileOpening = true
+            return
+        }
+        if phase == .open && hasDeferredRecovery {
+            screenReconcileWorkItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.phase == .open else { return }
+                self.open(completion: { _ in })
+            }
+            screenReconcileWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+            return
+        }
         guard phase == .drawn else { return }
         screenReconcileWorkItem?.cancel()
         screenReconcileCancellation?.cancel()
@@ -463,6 +504,12 @@ final class CurtainCoordinator {
         }
         screenReconcileWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+    }
+
+    private var hasDeferredRecovery: Bool {
+        [paths.displaySessionBackup, paths.brightnessBackup, paths.windowSessionBackup].contains {
+            !((try? DeferredRecovery.candidates(for: $0)) ?? []).isEmpty
+        }
     }
 
     private func changed() {
