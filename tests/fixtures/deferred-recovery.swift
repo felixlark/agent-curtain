@@ -192,3 +192,31 @@ let reusedPID = WindowSessionController(paths: paths, captureOperation: { window
 _ = try reusedPID.restoreAllWindows()
 precondition(currentProcessRestored, "an old reused PID must not supersede the current process target")
 print("PASS: stale PID targets cannot supersede a newer process's window metadata")
+
+for identifier in [nil, "", "reused-ax-identifier"] as [String?] {
+    let oldWeak = SavedWindow(ownerPID: 42, bundleIdentifier: "example", applicationName: "Example",
+        windowID: nil, identifier: identifier, title: "Old document", role: "AXWindow", subrole: "AXStandardWindow",
+        ordinal: 0, displayUUID: "absent", frame: frame, relativeFrame: frame)
+    let newWeak = SavedWindow(ownerPID: 42, bundleIdentifier: "example", applicationName: "Example",
+        windowID: nil, identifier: identifier, title: "New document", role: "AXWindow", subrole: "AXStandardWindow",
+        ordinal: 0, displayUUID: "external", frame: frame, relativeFrame: frame)
+    let oldFile = DeferredRecovery.destination(for: paths.windowSessionBackup)
+    try WindowSessionBackupStore.write(WindowSessionBackup(ownerPID: 42, createdAt: saved.createdAt,
+        displays: [], windows: [oldWeak]), to: oldFile)
+    try WindowSessionBackupStore.write(WindowSessionBackup(ownerPID: 42, createdAt: newProcessCapture,
+        displays: [], windows: [newWeak]), to: paths.windowSessionBackup)
+    var newDocumentRestored = false
+    let weak = WindowSessionController(paths: paths, captureOperation: { windowBackup },
+        restoreOperation: { backup, _ in
+            if !backup.windows.isEmpty {
+                precondition(backup.windows == [newWeak])
+                newDocumentRestored = true
+            }
+            return WindowRestorationReport(saved: backup.windows.count, restored: backup.windows.count, disappeared: 0)
+        }, activeDisplayUUIDs: { ["external"] }, processStartTime: { _ in Date(timeIntervalSince1970: 0) })
+    _ = try weak.restoreAllWindows()
+    precondition(newDocumentRestored, "a weak ordinal/AX identifier must not merge different windows")
+    require(try WindowSessionBackupStore.read(from: oldFile).windows == [oldWeak])
+    try FileManager.default.removeItem(at: oldFile)
+}
+print("PASS: missing, empty or reused AX identifiers never cause deletion-based cross-session window arbitration")

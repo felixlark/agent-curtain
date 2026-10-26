@@ -171,6 +171,8 @@ duplicate replay entries are removed. A still-deferred display layout also keeps
 its original window records deferred. A second display attached during recovery
 gets another pass after the first finishes; unchanged topology does not create a
 retry loop.
+Window arbitration requires a verified process lifetime and a unique WindowServer
+ID; AX ordinals or identifiers alone never justify deleting another source's target.
 
 A transaction returning `complete returned 1001` is retried at most three times.
 After exhaustion the original target is deferred with a warning. Other errors,

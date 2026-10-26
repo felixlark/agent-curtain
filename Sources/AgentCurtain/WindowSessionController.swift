@@ -64,23 +64,27 @@ final class WindowSessionController {
         candidates = RecoveryClaimFiles.unique(candidates)
         var lifetimes: [Int32: Date] = [:]
         var checked = Set<Int32>()
-        func key(_ window: SavedWindow, in backup: WindowSessionBackup) -> String {
+        func key(_ window: SavedWindow, in backup: WindowSessionBackup) -> String? {
             if checked.insert(window.ownerPID).inserted, let start = processStartTime(window.ownerPID) {
                 lifetimes[window.ownerPID] = start
             }
             let sameProcess = lifetimes[window.ownerPID].map { $0 <= backup.createdAt } ?? false
-            let lifetime = sameProcess ? "current" : "unverified-\(backup.createdAt.timeIntervalSince1970)"
-            let identity = window.windowID.map { "windowID=\($0)" }
-                ?? window.identifier.map { "identifier=\($0)" }
-                ?? "ordinal=\(window.ordinal),role=\(window.role),subrole=\(window.subrole)"
-            return [String(window.ownerPID), window.bundleIdentifier ?? "", lifetime, identity]
+            // AX ordinals and identifiers may be reused by another window in the
+            // same process. Only a unique WindowServer ID with verified process
+            // lifetime can justify deleting another source's replay target.
+            guard sameProcess, let windowID = window.windowID, windowID > 0,
+                  backup.windows.filter({ $0.ownerPID == window.ownerPID && $0.windowID == windowID }).count == 1
+            else { return nil }
+            return [String(window.ownerPID), window.bundleIdentifier ?? "", "windowID=\(windowID)"]
                 .map { "\($0.utf8.count):\($0)" }.joined()
         }
         try DeferredRecovery.arbitrate(candidates, read: WindowSessionBackupStore.read,
-            createdAt: { $0.createdAt }, keys: { backup in backup.windows.map { key($0, in: backup) } },
+            createdAt: { $0.createdAt }, keys: { backup in backup.windows.compactMap { key($0, in: backup) } },
             keeping: { backup, keys in
                 WindowSessionBackup(ownerPID: backup.ownerPID, createdAt: backup.createdAt,
-                    displays: backup.displays, windows: backup.windows.filter { keys.contains(key($0, in: backup)) })
+                    displays: backup.displays, windows: backup.windows.filter {
+                        key($0, in: backup).map { keys.contains($0) } ?? true
+                    })
             }, write: WindowSessionBackupStore.write)
 
         guard !candidates.isEmpty else { return nil }
