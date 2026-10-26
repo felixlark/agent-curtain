@@ -25,6 +25,9 @@ final class CurtainCoordinator {
     private var screenReconcileWorkItem: DispatchWorkItem?
     private var screenReconcileCancellation: CurtainCancellation?
     private var screenObserver: NSObjectProtocol?
+    private let activeScreenUUIDs: () -> Set<String>
+    private var openingScreenUUIDs = Set<String>()
+    private var screenChangedWhileOpening = false
     private var pendingOpenCompletions: [(ControlResponse) -> Void] = []
 
     private(set) var phase: Phase = .starting
@@ -43,8 +46,11 @@ final class CurtainCoordinator {
     }
     var onChange: (() -> Void)?
 
-    init(paths: CurtainPaths) {
+    init(paths: CurtainPaths, activeScreenUUIDs: @escaping () -> Set<String> = {
+        WindowSessionOperations.activeDisplayUUIDs
+    }) {
         self.paths = paths
+        self.activeScreenUUIDs = activeScreenUUIDs
         brightness = BrightnessController(paths: paths)
         displaySession = DisplaySessionController(paths: paths)
         windowSession = WindowSessionController(paths: paths)
@@ -238,6 +244,8 @@ final class CurtainCoordinator {
         pendingOpenCompletions.append(completion)
         if phase == .opening { return }
 
+        openingScreenUUIDs = activeScreenUUIDs()
+        screenChangedWhileOpening = false
         phase = .opening
         drawCancellation?.cancel()
         drawCancellation = nil
@@ -330,7 +338,8 @@ final class CurtainCoordinator {
             // Windows saved on a retired display cannot be placed again. Passing the
             // retired set lets the window path retire them instead of pending forever.
             do { _ = try windowSession.restoreAllWindows(
-                retiredDisplays: displaySession.lastRetiredDisplays) }
+                retiredDisplays: displaySession.lastRetiredDisplays,
+                deferredDisplays: try displaySession.deferredDisplayUUIDs()) }
             catch { messages.append("window restore: \(error.localizedDescription)") }
         }
         var activeCount: Int?
@@ -375,6 +384,9 @@ final class CurtainCoordinator {
         let callbacks = pendingOpenCompletions
         pendingOpenCompletions.removeAll()
         callbacks.forEach { $0(response) }
+        let needsAnotherPass = screenChangedWhileOpening && activeScreenUUIDs() != openingScreenUUIDs
+        screenChangedWhileOpening = false
+        if needsAnotherPass { screensChanged() }
     }
 
     func reload(completion: @escaping (ControlResponse) -> Void) {
@@ -448,6 +460,10 @@ final class CurtainCoordinator {
     }
 
     private func screensChanged() {
+        if phase == .opening {
+            screenChangedWhileOpening = true
+            return
+        }
         if phase == .open && hasDeferredRecovery {
             screenReconcileWorkItem?.cancel()
             let item = DispatchWorkItem { [weak self] in

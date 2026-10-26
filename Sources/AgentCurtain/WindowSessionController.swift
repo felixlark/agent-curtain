@@ -6,6 +6,7 @@ final class WindowSessionController {
     private let captureOperation: () throws -> WindowSessionBackup
     private let restoreOperation: (WindowSessionBackup, Set<String>) throws -> WindowRestorationReport
     private let activeDisplayUUIDs: () -> Set<String>
+    private let processStartTime: (Int32) -> Date?
     private(set) var recoveryWarning: String?
     private(set) var lastCapturedCount = 0
     private(set) var lastRestoredCount = 0
@@ -18,12 +19,14 @@ final class WindowSessionController {
         restoreOperation: @escaping (WindowSessionBackup, Set<String>) throws -> WindowRestorationReport = {
             try WindowSessionOperations.restore($0, retiredDisplays: $1)
         },
-        activeDisplayUUIDs: @escaping () -> Set<String> = { WindowSessionOperations.activeDisplayUUIDs }
+        activeDisplayUUIDs: @escaping () -> Set<String> = { WindowSessionOperations.activeDisplayUUIDs },
+        processStartTime: @escaping (Int32) -> Date? = { WindowSessionOperations.processStartTime(pid: $0) }
     ) {
         self.paths = paths
         self.captureOperation = captureOperation
         self.restoreOperation = restoreOperation
         self.activeDisplayUUIDs = activeDisplayUUIDs
+        self.processStartTime = processStartTime
     }
 
     func capture() throws -> Int {
@@ -47,7 +50,7 @@ final class WindowSessionController {
     /// saved on a display the system no longer reports are retired and archived:
     /// keeping them pending is what leaves an unlock stuck at a positive count.
     @discardableResult
-    func restoreAllWindows(retiredDisplays: Set<String>) throws -> WindowRestorationReport? {
+    func restoreAllWindows(retiredDisplays: Set<String>, deferredDisplays: Set<String> = []) throws -> WindowRestorationReport? {
         let original = paths.windowSessionBackup
         var candidates: [URL] = []
         if let claimed = try WindowSessionBackupStore.claim(original) { candidates.append(claimed) }
@@ -56,34 +59,64 @@ final class WindowSessionController {
             prefix: "window-session.json.restoring."
         ))
         let deferred = try DeferredRecovery.candidates(for: original)
-        let active = activeDisplayUUIDs()
-        candidates.insert(contentsOf: try deferred.filter {
-            try WindowSessionBackupStore.read(from: $0).windows.contains { active.contains($0.displayUUID) }
-        }, at: 0)
+        let active = activeDisplayUUIDs().subtracting(deferredDisplays)
+        candidates.append(contentsOf: deferred)
+        candidates = RecoveryClaimFiles.unique(candidates)
+        var lifetimes: [Int32: Date] = [:]
+        var checked = Set<Int32>()
+        func key(_ window: SavedWindow, in backup: WindowSessionBackup) -> String {
+            if checked.insert(window.ownerPID).inserted, let start = processStartTime(window.ownerPID) {
+                lifetimes[window.ownerPID] = start
+            }
+            let sameProcess = lifetimes[window.ownerPID].map { $0 <= backup.createdAt } ?? false
+            let lifetime = sameProcess ? "current" : "unverified-\(backup.createdAt.timeIntervalSince1970)"
+            let identity = window.windowID.map { "windowID=\($0)" }
+                ?? window.identifier.map { "identifier=\($0)" }
+                ?? "ordinal=\(window.ordinal),role=\(window.role),subrole=\(window.subrole)"
+            return [String(window.ownerPID), window.bundleIdentifier ?? "", lifetime, identity]
+                .map { "\($0.utf8.count):\($0)" }.joined()
+        }
+        try DeferredRecovery.arbitrate(candidates, read: WindowSessionBackupStore.read,
+            createdAt: { $0.createdAt }, keys: { backup in backup.windows.map { key($0, in: backup) } },
+            keeping: { backup, keys in
+                WindowSessionBackup(ownerPID: backup.ownerPID, createdAt: backup.createdAt,
+                    displays: backup.displays, windows: backup.windows.filter { keys.contains(key($0, in: backup)) })
+            }, write: WindowSessionBackupStore.write)
 
         guard !candidates.isEmpty else { return nil }
         var combined: WindowRestorationReport?
         var firstError: Error?
-        for claimed in RecoveryClaimFiles.unique(candidates) {
+        for claimed in candidates {
             do {
                 let complete = try WindowSessionBackupStore.read(from: claimed)
                 let isDeferred = DeferredRecovery.isDeferred(claimed, for: original)
                 let backup = WindowSessionBackup(ownerPID: complete.ownerPID, createdAt: complete.createdAt,
                     displays: complete.displays, windows: complete.windows.filter {
-                        !isDeferred || active.contains($0.displayUUID)
+                        !deferredDisplays.contains($0.displayUUID) && (!isDeferred || active.contains($0.displayUUID))
                     })
+                if isDeferred && backup.windows.isEmpty && !complete.windows.isEmpty { continue }
+                let held = complete.windows.filter { deferredDisplays.contains($0.displayUUID) }
                 var report: WindowRestorationReport?
                 var operationError: Error?
-                defer { recordAudit(before: backup, report: report, error: operationError) }
-                do { report = try restoreOperation(backup, retiredDisplays) }
+                defer { recordAudit(before: complete, report: report, error: operationError) }
+                do {
+                    let restored = try restoreOperation(backup, retiredDisplays)
+                    report = WindowRestorationReport(saved: restored.saved + held.count,
+                        restored: restored.restored, disappeared: restored.disappeared, excluded: restored.excluded,
+                        remaining: restored.remaining, failures: restored.failures, deviations: restored.deviations,
+                        retiredWindows: restored.retiredWindows + held.map {
+                            RetiredWindow(applicationName: $0.applicationName, windowID: $0.windowID,
+                                ordinal: $0.ordinal, displayUUID: $0.displayUUID)
+                        })
+                }
                 catch { operationError = error; throw error }
                 let result = report!
                 lastRestoredCount = result.restored
                 if !result.retiredWindows.isEmpty {
                     let offline = Set(result.retiredWindows.map(\.displayUUID))
                     if !isDeferred {
-                        try DeferredRecovery.saveWindows(backup,
-                            pending: backup.windows.filter { offline.contains($0.displayUUID) },
+                        try DeferredRecovery.saveWindows(complete,
+                            pending: complete.windows.filter { offline.contains($0.displayUUID) },
                             source: claimed, original: original)
                     }
                     let described = result.retiredWindows.map(\.description).joined(separator: "; ")

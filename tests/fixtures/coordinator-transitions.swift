@@ -53,6 +53,8 @@ final class Scenario {
     var savedDisplayOnline = false
     var retiredDisplays: Set<String> = []
     var lastWindowRetirement: Set<String> = []
+    var deferredLayouts: Set<String> = []
+    var lastWindowDeferred: Set<String> = []
     // The following observations are accessed only by main-thread fake UI/input APIs.
     var presentations: [BannerController.Presentation] = []
     var starts = 0
@@ -61,6 +63,7 @@ final class Scenario {
     var stops = 0
     var reconciliations = 0
     var screenChange: (() -> Void)?
+    var activeScreenUUIDs: Set<String> = ["internal"]
 }
 
 final class InputBlocker {
@@ -160,6 +163,7 @@ final class DisplaySessionController {
         }
     }
     var pendingRestoreCount: Int { scenario.offlineRestorePending ? 5 : 0 }
+    func deferredDisplayUUIDs() throws -> Set<String> { scenario.deferredLayouts }
     var displayBackendStatus: String? { "system-spi" }
     var betterDisplayProStatus: String { "off" }
     var privateDisplaySPIStatus: String { "available" }
@@ -172,9 +176,10 @@ final class WindowSessionController {
     var lastCapturedCount = 0
     var lastRestoredCount = 0
     func capture() throws -> Int { 3 }
-    func restoreAllWindows(retiredDisplays: Set<String>) throws -> WindowRestorationReport? {
+    func restoreAllWindows(retiredDisplays: Set<String>, deferredDisplays: Set<String> = []) throws -> WindowRestorationReport? {
         if !scenario.prepared { scenario.startupWindowCalls += 1 }
         scenario.lastWindowRetirement = retiredDisplays
+        scenario.lastWindowDeferred = deferredDisplays
         if scenario.windowRestoreFails { throw FixtureFailure(message: "window restoration refused") }
         return nil
     }
@@ -196,7 +201,7 @@ func runScenario(_ name: String, blockerFails: Bool = false, restoreFails: Bool 
     }
     let paths = CurtainPaths(home: temporaryHome)
     scenario.paths = paths
-    let coordinator = CurtainCoordinator(paths: paths)
+    let coordinator = CurtainCoordinator(paths: paths, activeScreenUUIDs: { scenario.activeScreenUUIDs })
     var prepared = false
     coordinator.prepare { prepared = true }
     try pump(until: { prepared }, "prepare \(name)")
@@ -434,13 +439,30 @@ func openScreenChangeRetriesDeferredRecovery() throws {
         let deferred = DeferredRecovery.destination(for: scenario.paths.displaySessionBackup)
         try Data().write(to: deferred)
         let before = scenario.startupDisplayCalls
+        scenario.deferredLayouts = ["external"]
         NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
         NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
         try scenario.restore.awaitEntry("open hot-plug restore")
         try require(coordinator.phase == .opening && scenario.startupDisplayCalls == before + 1,
             "screen changes must debounce into one open recovery without a draw")
+        scenario.activeScreenUUIDs.insert("second-hotplug")
+        NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
         scenario.restore.release.signal()
         try pump(until: { coordinator.phase == .open }, "hot-plug recovery finished")
+        try require(scenario.lastWindowDeferred == ["external"],
+            "unresolved layout UUIDs must be handed to window recovery")
+        scenario.deferredLayouts = []
+        try scenario.restore.awaitEntry("second display connected during opening")
+        try require(scenario.startupDisplayCalls == before + 2,
+            "a display attached during opening gets a new recovery pass")
+        // A notification that changes no display identity must not loop indefinitely.
+        NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        scenario.restore.release.signal()
+        try pump(until: { coordinator.phase == .open }, "second hot-plug recovery finished")
+        let deadline = Date().addingTimeInterval(0.5)
+        while Date() < deadline { _ = RunLoop.main.run(mode: .default, before: deadline) }
+        try require(coordinator.phase == .open && scenario.startupDisplayCalls == before + 2,
+            "unchanged topology must not create an automatic recovery loop")
         try require(coordinator.lastError == nil && scenario.starts == 0,
             "hot-plug recovery remains open and never starts the input blocker")
     }

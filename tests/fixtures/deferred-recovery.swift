@@ -10,6 +10,7 @@ try paths.prepareDirectories()
 let cli = home.appendingPathComponent("cli")
 try #"""
 #!/bin/sh
+printf '%s\n' "$*" >> "${0%/*}/commands"
 case "$*" in
   'get --identifiers') cat "${0%/*}/identities" ;;
   'get -proAvailable') echo on ;;
@@ -110,8 +111,84 @@ let reconnected = WindowSessionController(paths: paths, captureOperation: { wind
         precondition(backup.createdAt == saved.createdAt && backup.windows == [window])
         restored = true
         return WindowRestorationReport(saved: 1, restored: 1, disappeared: 0)
-    }, activeDisplayUUIDs: { ["external"] })
+    }, activeDisplayUUIDs: { ["external"] }, processStartTime: { _ in Date(timeIntervalSince1970: 0) })
 _ = try reconnected.restoreAllWindows()
 precondition(restored)
 require(try DeferredRecovery.candidates(for: paths.windowSessionBackup).isEmpty)
 print("PASS: deferred windows retain PID-lifetime timestamp and restore on reconnection")
+
+let oldTarget = DisplaySessionBackup(ownerPID: 42, createdAt: saved.createdAt,
+    connectionBackend: .betterDisplay, displays: [misplaced])
+try DisplaySessionBackupStore.write(oldTarget, to: DeferredRecovery.destination(for: paths.displaySessionBackup))
+try DisplaySessionBackupStore.write(DisplaySessionBackup(ownerPID: 42,
+    connectionBackend: .betterDisplay, displays: [internalDisplay]), to: paths.displaySessionBackup)
+var layouts: [String] = []
+let overlap = DisplaySessionController(paths: paths, clientFactory: clientFactory, restoreOperation: { backup, _ in
+    layouts.append(contentsOf: backup.displays.map(\.placement))
+    return DisplayRestoreReport(restored: backup.displays.map(\.uuid))
+})
+try overlap.restoreAllDisplays()
+precondition(layouts == ["123x456"], "only the oldest unresolved topology may replay, even with multiple deferred files")
+
+try BrightnessBackupStore.write(BrightnessBackup(ownerPID: 42, createdAt: saved.createdAt, displays: [
+    DisplayBrightness(displayID: 22, brightness: 0.73, uuid: "external")
+]), to: DeferredRecovery.destination(for: paths.brightnessBackup))
+try BrightnessBackupStore.write(BrightnessBackup(ownerPID: 42, createdAt: Date(timeIntervalSince1970: 150), displays: [
+    DisplayBrightness(displayID: 22, brightness: 0.735, uuid: "external")
+]), to: DeferredRecovery.destination(for: paths.brightnessBackup))
+try BrightnessBackupStore.write(BrightnessBackup(ownerPID: 42, displays: [
+    DisplayBrightness(displayID: 22, brightness: 0.74, uuid: "external")
+]), to: paths.brightnessBackup)
+try brightness.restoreAllDisplays()
+let writes = try String(contentsOf: home.appendingPathComponent("commands"), encoding: .utf8)
+    .split(separator: "\n").filter { $0.hasPrefix("set get -displayID=22 -brightness=") }
+precondition(writes.last?.hasSuffix("=0.73") == true, "hot-plug capture must not overwrite deferred brightness")
+
+try WindowSessionBackupStore.write(windowBackup, to: DeferredRecovery.destination(for: paths.windowSessionBackup))
+try WindowSessionBackupStore.write(WindowSessionBackup(ownerPID: 42, displays: [], windows: [window]),
+    to: paths.windowSessionBackup)
+var windowDates: [Date] = []
+let overlapWindows = WindowSessionController(paths: paths, captureOperation: { windowBackup },
+    restoreOperation: { backup, _ in
+        if !backup.windows.isEmpty { windowDates.append(backup.createdAt) }
+        return WindowRestorationReport(saved: backup.windows.count, restored: backup.windows.count, disappeared: 0)
+    }, activeDisplayUUIDs: { ["external"] }, processStartTime: { _ in Date(timeIntervalSince1970: 0) })
+_ = try overlapWindows.restoreAllWindows()
+precondition(windowDates == [saved.createdAt], "the same window must replay only its original target and timestamp")
+print("PASS: overlapping live snapshots cannot overwrite deferred topology, brightness or windows")
+
+try WindowSessionBackupStore.write(windowBackup, to: paths.windowSessionBackup)
+var corrected = false
+let waitingForLayout = WindowSessionController(paths: paths, captureOperation: { windowBackup },
+    restoreOperation: { backup, _ in
+        if !backup.windows.isEmpty {
+            precondition(backup.createdAt == saved.createdAt && backup.windows == [window])
+            corrected = true
+        }
+        return WindowRestorationReport(saved: backup.windows.count, restored: backup.windows.count, disappeared: 0)
+    }, activeDisplayUUIDs: { ["external"] }, processStartTime: { _ in Date(timeIntervalSince1970: 0) })
+_ = try waitingForLayout.restoreAllWindows(retiredDisplays: [], deferredDisplays: ["external"])
+precondition(!corrected && waitingForLayout.pendingRestoreCount == 0)
+let heldWindows = try DeferredRecovery.candidates(for: paths.windowSessionBackup)
+precondition(heldWindows.count == 1)
+require(try WindowSessionBackupStore.read(from: heldWindows[0]).createdAt == saved.createdAt)
+_ = try waitingForLayout.restoreAllWindows(retiredDisplays: [], deferredDisplays: [])
+precondition(corrected)
+require(try DeferredRecovery.candidates(for: paths.windowSessionBackup).isEmpty)
+print("PASS: active displays with deferred layout retain original window metadata until layout succeeds")
+
+try WindowSessionBackupStore.write(windowBackup, to: DeferredRecovery.destination(for: paths.windowSessionBackup))
+let newProcessCapture = Date(timeIntervalSince1970: 200)
+try WindowSessionBackupStore.write(WindowSessionBackup(ownerPID: 42, createdAt: newProcessCapture,
+    displays: [], windows: [window]), to: paths.windowSessionBackup)
+var currentProcessRestored = false
+let reusedPID = WindowSessionController(paths: paths, captureOperation: { windowBackup },
+    restoreOperation: { backup, _ in
+        let valid = backup.createdAt >= Date(timeIntervalSince1970: 150)
+        if valid && !backup.windows.isEmpty { currentProcessRestored = true }
+        return WindowRestorationReport(saved: backup.windows.count,
+            restored: valid ? backup.windows.count : 0, disappeared: valid ? 0 : backup.windows.count)
+    }, activeDisplayUUIDs: { ["external"] }, processStartTime: { _ in Date(timeIntervalSince1970: 150) })
+_ = try reusedPID.restoreAllWindows()
+precondition(currentProcessRestored, "an old reused PID must not supersede the current process target")
+print("PASS: stale PID targets cannot supersede a newer process's window metadata")

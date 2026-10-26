@@ -72,17 +72,17 @@ final class BrightnessController {
             prefix: "brightness.json.restoring."
         ))
         let deferred = try DeferredRecovery.candidates(for: original)
-        if !deferred.isEmpty {
-            let active = try client.activeDisplays()
-            candidates.insert(contentsOf: try deferred.filter {
-                try BrightnessBackupStore.read(from: $0).displays.contains {
-                    (try? BrightnessRestoration.target(for: $0, active: active)) != nil
-                }
-            }, at: 0)
-        }
+        candidates.append(contentsOf: deferred)
+        candidates = RecoveryClaimFiles.unique(candidates)
+        func key(_ entry: DisplayBrightness) -> String { entry.uuid ?? "displayID=\(entry.displayID)" }
+        try DeferredRecovery.arbitrate(candidates, read: BrightnessBackupStore.read,
+            createdAt: { $0.createdAt }, keys: { $0.displays.map(key) }, keeping: { backup, keys in
+                BrightnessBackup(ownerPID: backup.ownerPID, createdAt: backup.createdAt,
+                    displays: backup.displays.filter { keys.contains(key($0)) })
+            }, write: BrightnessBackupStore.write)
 
         var firstError: Error?
-        for claimed in RecoveryClaimFiles.unique(candidates) {
+        for claimed in candidates {
             do {
                 let complete = try BrightnessBackupStore.read(from: claimed)
                 let isDeferred = DeferredRecovery.isDeferred(claimed, for: original)
@@ -91,6 +91,7 @@ final class BrightnessController {
                     displays: complete.displays.filter {
                         !isDeferred || (try? BrightnessRestoration.target(for: $0, active: active)) != nil
                     })
+                if isDeferred && backup.displays.isEmpty && !complete.displays.isEmpty { continue }
                 do {
                     // The report retires saved displays the system no longer reports,
                     // so one unplugged monitor cannot pin the whole backup forever.

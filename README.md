@@ -165,6 +165,13 @@ successful recovery consumes those deferred entries, while offline targets remai
 available for a later hot-plug. Window records retain their original timestamps
 to protect against PID reuse.
 
+Recovery arbitrates overlapping live and deferred records by target identity:
+the oldest unresolved target wins, and superseded records are archived before
+duplicate replay entries are removed. A still-deferred display layout also keeps
+its original window records deferred. A second display attached during recovery
+gets another pass after the first finishes; unchanged topology does not create a
+retry loop.
+
 A transaction returning `complete returned 1001` is retried at most three times.
 After exhaustion the original target is deferred with a warning. Other errors,
 including mode failures after a layout rejection, remain failures and retain the

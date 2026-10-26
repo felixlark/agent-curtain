@@ -50,9 +50,9 @@ final class DisplaySessionController {
         // can restore it. A display the system no longer knows about is retired:
         // keeping it would make every future restore write an impossible identity.
         let inventory = Set(try client.displays().compactMap(\.uuid))
-        let allPrevious = try DeferredRecovery.candidates(for: paths.displaySessionBackup).flatMap {
-            try DisplaySessionBackupStore.read(from: $0).displays
-        }
+        let allPrevious = try DeferredRecovery.candidates(for: paths.displaySessionBackup).map {
+            try DisplaySessionBackupStore.read(from: $0)
+        }.sorted { $0.createdAt < $1.createdAt }.flatMap(\.displays)
         var previous: [DisplayTopology] = []
         for saved in allPrevious where !previous.contains(where: { $0.uuid == saved.uuid }) {
             previous.append(saved)
@@ -130,16 +130,17 @@ final class DisplaySessionController {
             prefix: "display-session.json.restoring."
         ))
         let deferred = try DeferredRecovery.candidates(for: original)
-        if !deferred.isEmpty {
-            let active = Set(try clientFactory().activeDisplays().compactMap(\.uuid))
-            candidates.insert(contentsOf: try deferred.filter {
-                try DisplaySessionBackupStore.read(from: $0).displays.contains { active.contains($0.uuid) }
-            }, at: 0)
-        }
+        candidates.append(contentsOf: deferred)
+        candidates = RecoveryClaimFiles.unique(candidates)
+        try DeferredRecovery.arbitrate(candidates, read: DisplaySessionBackupStore.read,
+            createdAt: { $0.createdAt }, keys: { $0.displays.map(\.uuid) }, keeping: { backup, keys in
+                DisplaySessionBackup(ownerPID: backup.ownerPID, createdAt: backup.createdAt,
+                    connectionBackend: backup.connectionBackend, displays: backup.displays.filter { keys.contains($0.uuid) })
+            }, write: DisplaySessionBackupStore.write)
 
         guard !candidates.isEmpty else { return }
         var firstError: Error?
-        for claimed in RecoveryClaimFiles.unique(candidates) {
+        for claimed in candidates {
             do {
                 let client = try clientFactory()
                 let complete = try DisplaySessionBackupStore.read(from: claimed)
@@ -148,6 +149,7 @@ final class DisplaySessionController {
                 let saved = DisplaySessionBackup(ownerPID: complete.ownerPID, createdAt: complete.createdAt,
                     connectionBackend: complete.connectionBackend,
                     displays: complete.displays.filter { active?.contains($0.uuid) ?? true })
+                if isDeferred && saved.displays.isEmpty && !complete.displays.isEmpty { continue }
                 let backup = DisplaySessionOperations.refreshDisplayIDs(
                     in: saved,
                     identities: try client.displays()
@@ -195,6 +197,12 @@ final class DisplaySessionController {
     func recoverStaleBackup() throws {
         guard hasBackup else { return }
         try restoreAllDisplays()
+    }
+
+    func deferredDisplayUUIDs() throws -> Set<String> {
+        Set(try DeferredRecovery.candidates(for: paths.displaySessionBackup).flatMap {
+            try DisplaySessionBackupStore.read(from: $0).displays.map(\.uuid)
+        })
     }
 
     func currentActiveDisplayCount() throws -> Int {

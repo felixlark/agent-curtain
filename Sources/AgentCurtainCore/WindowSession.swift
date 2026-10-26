@@ -443,6 +443,8 @@ public enum WindowSessionError: Error, LocalizedError {
 }
 
 public enum WindowSessionOperations {
+    public static func processStartTime(pid: Int32) -> Date? { ProcessStartTime.read(pid: pid) }
+
     public static var activeDisplayUUIDs: Set<String> {
         Set(activeDisplayGeometries().map(\.uuid))
     }
