@@ -15,16 +15,6 @@ final class BannerController {
             }
         }
 
-        var detail: String {
-            switch self {
-            case .enabling: return "⌃⌥⌘U 取消"
-            case .protected, .markerProtected: return "⌃⌥⌘U 解除"
-            case .disabling: return "恢复屏幕…"
-            case .released: return "可正常操作"
-            case .failed: return "请查看菜单"
-            }
-        }
-
         var background: NSColor {
             switch self {
             case .protected, .markerProtected: return BannerController.featureColor
@@ -109,8 +99,9 @@ final class BannerController {
     private func makeWindow(on screen: NSScreen) -> NSWindow {
         let topInset = max(screen.frame.maxY - screen.visibleFrame.maxY, screen.safeAreaInsets.top)
         let height = topInset > 0 ? topInset : NSStatusBar.system.thickness
-        // Keep the whole indicator centered. On a notched screen reserve the
-        // camera cutout, placing equal-width status and shortcut wings beside it.
+        // Keep only the status indicator. On a notched screen place it in the
+        // left side of the camera cutout; the shortcut hint is intentionally
+        // omitted to keep the banner compact.
         let notchGap: CGFloat
         if screen.safeAreaInsets.top > 0,
            let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
@@ -120,9 +111,15 @@ final class BannerController {
         } else {
             notchGap = 0
         }
-        let wingWidth: CGFloat = 140
-        let width = min(notchGap > 0 ? notchGap + wingWidth * 2 : 220, screen.frame.width)
-        let rect = NSRect(x: screen.frame.midX - width / 2, y: screen.frame.maxY - height, width: width, height: height)
+        let statusWidth: CGFloat = 136
+        let width = min(statusWidth, screen.frame.width)
+        let x: CGFloat
+        if notchGap > 0, let left = screen.auxiliaryTopLeftArea {
+            x = max(screen.frame.minX, left.maxX - width)
+        } else {
+            x = screen.frame.midX - width / 2
+        }
+        let rect = NSRect(x: x, y: screen.frame.maxY - height, width: width, height: height)
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: rect.size),
                               styleMask: .borderless, backing: .buffered, defer: false, screen: screen)
         // NSWindow's screen initializer uses screen-local coordinates.
@@ -137,12 +134,7 @@ final class BannerController {
         window.isReleasedWhenClosed = false
 
         let content = NSView(frame: NSRect(origin: .zero, size: rect.size))
-        if notchGap > 0 {
-            content.addSubview(BannerSegment(frame: NSRect(x: 0, y: 0, width: wingWidth, height: height), role: .status))
-            content.addSubview(BannerSegment(frame: NSRect(x: width - wingWidth, y: 0, width: wingWidth, height: height), role: .detail))
-        } else {
-            content.addSubview(BannerSegment(frame: content.bounds, role: .combined))
-        }
+        content.addSubview(BannerSegment(frame: content.bounds, role: .status))
         window.contentView = content
         update(window, animated: false)
         window.orderFrontRegardless()
@@ -158,8 +150,6 @@ final class BannerController {
             let text: String
             switch segment.role {
             case .status: text = status
-            case .detail: text = presentation.detail
-            case .combined: text = "\(status) · \(presentation.detail)"
             }
             segment.apply(text: text, presentation: presentation, animated: animated)
         }
@@ -167,7 +157,7 @@ final class BannerController {
 }
 
 private final class BannerSegment: NSView {
-    enum Role { case combined, status, detail }
+    enum Role { case status }
     let role: Role
     private let label = NSTextField(labelWithString: "")
 
@@ -175,7 +165,7 @@ private final class BannerSegment: NSView {
         self.role = role
         super.init(frame: frame)
         wantsLayer = true
-        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
         addSubview(label)
@@ -187,7 +177,7 @@ private final class BannerSegment: NSView {
         label.stringValue = text
         label.textColor = presentation.foreground
         let height = ceil(label.intrinsicContentSize.height)
-        label.frame = NSRect(x: 8, y: floor((bounds.height - height) / 2), width: bounds.width - 16, height: height)
+        label.frame = NSRect(x: 6, y: floor((bounds.height - height) / 2), width: bounds.width - 12, height: height)
         layer?.removeAnimation(forKey: "dismiss")
         layer?.opacity = 1
         let previous = layer?.presentation()?.backgroundColor ?? layer?.backgroundColor
