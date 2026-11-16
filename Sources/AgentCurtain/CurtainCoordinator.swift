@@ -18,7 +18,7 @@ final class CurtainCoordinator {
     private let displaySession: DisplaySessionController
     private let windowSession: WindowSessionController
     private let expectation: CurtainExpectation
-    private let worker = DispatchQueue(label: "com.longbiaochen.AgentCurtain.operations")
+    private let worker = DispatchQueue(label: "agent-curtain.coordinator")
     private var configuration = CurtainConfiguration(allowedRules: [], deniedRules: [])
     private var autoOpenTimer: Timer?
     private var drawCancellation: CurtainCancellation?

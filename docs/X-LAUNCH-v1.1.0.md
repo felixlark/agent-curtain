@@ -7,7 +7,7 @@
 
 本轮以项目 GitHub 页为唯一落地页：
 
-<https://github.com/longbiaochen/agent-curtain>
+<https://github.com/felixlark/agent-curtain>
 
 ## 核心叙事
 
@@ -28,7 +28,7 @@ Mac 接了 3 块外屏，用 iPad 远程时却只想看一个桌面。
 AgentCurtain v1.1 启用保护后会暂时断开全部外屏，把窗口收回内屏；解除保护后，再按原显示器和原位置恢复。崩溃时，独立 watchdog 也会接管恢复。
 
 开源，适用于 Apple Silicon + macOS 26+：
-https://github.com/longbiaochen/agent-curtain
+https://github.com/felixlark/agent-curtain
 
 ### English
 
@@ -37,7 +37,7 @@ Three displays on my Mac. On iPad, I want one desktop.
 AgentCurtain v1.1 disconnects externals and moves their windows to the built-in screen. Reopen it to restore the layout and window frames—even after a crash.
 
 Open source:
-https://github.com/longbiaochen/agent-curtain
+https://github.com/felixlark/agent-curtain
 
 ## 配图与演示
 

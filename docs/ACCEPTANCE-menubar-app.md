@@ -22,7 +22,7 @@
   当前会话保存的恢复对象，不能据此认定解除失败。另有旧布局归档 warning，
   归档不代表恢复成功，亦不代表这 7 个当前对象全部来自旧故障。
 - 官方 Computer Use 读取真实安装版横幅，截图保存于
-  [安装版横幅](/Users/longbiao/Documents/Development/office/demo-20261013/agent-curtain/01-installed-1.1.3-protected-banner.png)。
+  安装版横幅（`~/Documents/Development/office/demo-20261013/agent-curtain/01-installed-1.1.3-protected-banner.png`，私有证据路径）。
   现有 ScreenCaptureKit framebuffer 验证器在唯一活动内屏 `displayID=1`
   检出 7,277 个 `#BF1A1A` 特征色像素，PASS。只证明当前活动内屏渲染，
   不证明外屏物理亮度、远程刷新或实体输入行为。
@@ -30,9 +30,9 @@
   此为源码逻辑回归，不能推断已安装二进制与这次重新编译产物逐字节一致。
 
 本轮日志和状态快照：
-[验收记录目录](</Users/longbiao/Library/Application Support/agent-curtain/acceptance/2026-10-13/>)。
+验收记录目录（`~/Library/Application Support/agent-curtain/acceptance/2026-10-13/`，私有证据路径）。
 版本、哈希、截图哈希与请求 ID 见
-[证据清单](/Users/longbiao/Documents/Development/office/demo-20261013/agent-curtain/evidence.json)。
+证据清单（`~/Documents/Development/office/demo-20261013/agent-curtain/evidence.json`，私有证据路径）。
 
 ## PRD §9 与设计扩展对照
 
@@ -62,6 +62,6 @@
 v1.1.3 后的下一里程碑为**保护与解除的实机可靠性验收**，沿既有设计关闭
 实体热键、UU 单屏操作、窗口归位及亮度的证据缺口，详见
 [推进计划](PLAN-post-v1.1.3.md)和
-[今晚确认清单](/Users/longbiao/Documents/Development/office/agent-curtain-实机确认-20261013.md)。
+今晚确认清单（`~/Documents/Development/office/agent-curtain-实机确认-20261013.md`，私有证据路径）。
 本轮新增只读快照工具，补齐当前安装版横幅证据并校正清单。
 产品仍为 1.1.3；Grok/用户尚未接受下一里程碑，未宣称完整硬件验收通过。
