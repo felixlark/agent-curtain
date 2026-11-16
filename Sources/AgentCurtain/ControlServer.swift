@@ -7,7 +7,7 @@ final class ControlServer {
 
     private let socketURL: URL
     private let handler: Handler
-    private let queue = DispatchQueue(label: "com.longbiaochen.AgentCurtain.control-server")
+    private let queue = DispatchQueue(label: "agent-curtain.control")
     private var listeningFD: Int32 = -1
     private var source: DispatchSourceRead?
 

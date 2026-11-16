@@ -19,7 +19,7 @@
 
 ## 验证结果
 
-安装候选：1.1.2，`/Applications/AgentCurtain.app`。Developer ID 为 `LONGBIAO CHEN (HJG65XBC25)`，运行时加固与时间戳签名；安装版和签名候选的主程序 SHA256 均为 `90d45cd93358d73d0ca81a6133246d8150de76e8afaef0233d0206f8fd685529`。
+安装候选：1.1.2，`/Applications/AgentCurtain.app`。Developer ID 为 `证书主体保留在私有回执`，运行时加固与时间戳签名；安装版和签名候选的主程序 SHA256 均为 `90d45cd93358d73d0ca81a6133246d8150de76e8afaef0233d0206f8fd685529`。
 
 - 19 项 XCTest、36 项 Swift Testing 通过。新增回归覆盖系统/临时窗口排除、主屏恢复顺序、竖屏过渡参数和组件写入破坏总亮度的假成功。
 - 窗口控制器隔离回归 4/4、状态机回归 8/8；崩溃看护隔离集成、横幅布局与生命周期检查通过。看护 fixture 仍假定恢复到 100%，已修正为保存的 0.75，并验证最终读回。

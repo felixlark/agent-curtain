@@ -55,7 +55,7 @@ identifier "com.example.app" and anchor apple generic
 
 交付**单个** `AgentCurtain.app`:
 
-- 用 **Developer ID Application: LONGBIAO CHEN (HJG65XBC25)** 签名
+- 用 **`<available-Apple-signing-certificate-SHA1>`** 签名
 - 菜单栏图标显示状态,点击切换
 - 内嵌事件阻断、提示条、亮度控制
 - 暴露本地控制端点,供瘦 CLI 远程驱动
@@ -242,7 +242,7 @@ org.pqrs.Karabiner-DriverKit-VirtualHIDDevice
 
 ```bash
 codesign --force --options runtime --timestamp \
-  --sign "Developer ID Application: LONGBIAO CHEN (HJG65XBC25)" \
+  --sign "<available-Apple-signing-certificate-SHA1>" \
   AgentCurtain.app
 ```
 
@@ -252,7 +252,7 @@ codesign --force --options runtime --timestamp \
 codesign -d -r- AgentCurtain.app
 # 期望形如:
 # designated => identifier "..." and anchor apple generic
-#   and certificate leaf[subject.OU] = HJG65XBC25
+#   and certificate leaf[subject.OU] = <team-id>
 ```
 
 若输出里出现 `cdhash`,说明签名方式不对,授权仍会在重编译后失效 —— 这是

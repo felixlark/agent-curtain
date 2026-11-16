@@ -56,28 +56,32 @@ Requirements:
 - Apple Silicon and macOS 26 or newer;
 - Xcode Command Line Tools;
 - BetterDisplay with `betterdisplaycli` installed; Pro is an optional fallback;
-- the Developer ID identity named in the PRD when building from source.
+- an available Apple signing certificate with a Developer ID requirement; provide its SHA-1 or exact display name explicitly.
 
 ```bash
-git clone https://github.com/longbiaochen/agent-curtain.git
+git clone https://github.com/felixlark/agent-curtain.git
 cd agent-curtain
+export CURTAIN_SIGNING_IDENTITY="<available-Apple-signing-certificate-SHA1>"
 ./install.sh
+# To create a candidate without launching or installing:
+./script/build_and_run.sh --build-only
 ```
 
-The build signs the main executable, embedded watchdog, and outer app with:
-
-```text
-Developer ID Application: LONGBIAO CHEN (HJG65XBC25)
-```
+The build signs the main executable, embedded watchdog, and outer app with the
+explicit `CURTAIN_SIGNING_IDENTITY` selector. There is no personal-certificate
+fallback; unavailable selectors fail before signing. The selector may be a
+certificate SHA-1 (case-insensitive match) or its exact display name.
 
 Hardened Runtime and a secure timestamp are required. Installation fails rather
 than falling back to an ad-hoc signature. The installed app is verified again
 under `/Applications`.
 
 On first use, enable **AgentCurtain** in System Settings → Privacy & Security →
-Accessibility. Because the designated requirement is based on bundle identifier,
-Apple anchor, and Team ID—not `cdhash`—a later signed rebuild keeps the same
-authorization.
+Accessibility. Authorization continuity requires the same bundle identifier and
+Apple certificate requirement, without `cdhash`. The neutral public bundle and
+sentry defaults do not automatically preserve an older installation's identity;
+explicit compatibility inputs are required for that build. Parameter checks alone
+do not establish TCC or upgrade acceptance.
 
 ## Use
 

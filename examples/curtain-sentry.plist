@@ -1,17 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!--
-  curtain-sentry —— 每 5 分钟检查一次「你要求拉上、幕帘却不在」。
-  由 script/build_and_run.sh install 自动安装；手动安装:
-    sed "s|__HOME__|$HOME|g" examples/me.longbiaochen.curtain-sentry.plist \
-      > ~/Library/LaunchAgents/me.longbiaochen.curtain-sentry.plist
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/me.longbiaochen.curtain-sentry.plist
-  只读、不需要任何 TCC 授权、不会自动拉上幕帘，也不会替你启动 app。
--->
+<!-- curtain-sentry template. The build script supplies HOME and the selected Label.
+     It keeps the existing five-minute observation schedule and does not start the app. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>me.longbiaochen.curtain-sentry</string>
+  <string>__SENTRY_LABEL__</string>
   <key>ProgramArguments</key>
   <array>
     <string>__HOME__/.local/libexec/curtain-sentry</string>

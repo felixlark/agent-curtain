@@ -3,9 +3,10 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="AgentCurtain"
-BUNDLE_ID="com.longbiaochen.AgentCurtain"
+BUNDLE_ID="${CURTAIN_BUNDLE_ID:-org.felixlark.AgentCurtain}"
+SENTRY_LABEL="${CURTAIN_SENTRY_LABEL:-org.felixlark.curtain-sentry}"
 APP_VERSION="1.1.4"
-SIGNING_IDENTITY="${CURTAIN_SIGNING_IDENTITY:-Developer ID Application: LONGBIAO CHEN (HJG65XBC25)}"
+SIGNING_IDENTITY="${CURTAIN_SIGNING_IDENTITY:?set CURTAIN_SIGNING_IDENTITY to an available Apple signing certificate selector}"
 MIN_SYSTEM_VERSION="26.0"
 BUILD_CONFIGURATION="${CURTAIN_BUILD_CONFIGURATION:-release}"
 SWIFTPM_SCRATCH_PATH="${CURTAIN_SWIFTPM_SCRATCH_PATH:-${TMPDIR:-/tmp}/agent-curtain-swiftpm-$(id -u)}"
@@ -28,6 +29,28 @@ case "$MODE" in
     exit 2
     ;;
 esac
+
+# Values are identifiers, not shell fragments or log predicates.
+if [[ ! "$BUNDLE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || \
+   [[ ! "$SENTRY_LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "invalid bundle or sentry identifier" >&2
+  exit 2
+fi
+
+render_sentry_plist() {
+  python3 - "$ROOT_DIR/examples/curtain-sentry.plist" "$1" "$HOME" "$SENTRY_LABEL" <<'PLIST_PY'
+import plistlib, sys
+source, destination, home, label = sys.argv[1:]
+with open(source, "rb") as stream:
+    value = plistlib.load(stream)
+value["Label"] = label
+value["ProgramArguments"] = [item.replace("__HOME__", home) for item in value["ProgramArguments"]]
+for key in ("StandardOutPath", "StandardErrorPath"):
+    value[key] = value[key].replace("__HOME__", home)
+with open(destination, "wb") as stream:
+    plistlib.dump(value, stream)
+PLIST_PY
+}
 
 stop_running_app() {
   if [[ -S "$SOCKET_PATH" ]]; then
@@ -85,10 +108,21 @@ publish_dist_copy() {
 }
 
 sign_bundle() {
-  security find-identity -v -p codesigning | grep -Fq "\"$SIGNING_IDENTITY\"" || {
-    echo "required signing identity is unavailable: $SIGNING_IDENTITY" >&2
+  if ! security find-identity -v -p codesigning | python3 -c '
+import re, sys
+selector = sys.argv[1]
+sha1 = bool(re.fullmatch(r"[0-9a-fA-F]{40}", selector))
+available = False
+for line in sys.stdin:
+    match = re.fullmatch(r"\s*\d+\)\s+([0-9a-fA-F]{40})\s+\"(.*)\"\s*", line)
+    if match and ((sha1 and match[1].upper() == selector.upper()) or
+                  (not sha1 and match[2] == selector)):
+        available = True
+sys.exit(0 if available else 1)
+' "$SIGNING_IDENTITY"; then
+    echo "required Apple signing certificate is unavailable" >&2
     exit 1
-  }
+  fi
   clean_bundle_metadata
   codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_MACOS/AgentCurtain"
   clean_bundle_metadata
@@ -104,12 +138,10 @@ sign_bundle() {
   requirement="$(codesign -d -r- "$APP_BUNDLE" 2>&1)"
   grep -q 'anchor apple generic' <<<"$requirement" || {
     echo "designated requirement is not anchored to Apple Developer ID" >&2
-    echo "$requirement" >&2
     exit 1
   }
   if grep -q 'cdhash' <<<"$requirement"; then
     echo "designated requirement unexpectedly contains cdhash" >&2
-    echo "$requirement" >&2
     exit 1
   fi
   publish_dist_copy
@@ -183,9 +215,9 @@ install_artifacts() {
   # 在 2026-09-02 把幕帘拆掉、没装回去、也没有任何人被告知。
   mkdir -p "$HOME/.local/libexec" "$HOME/Library/LaunchAgents" "$HOME/.local/state/curtain"
   install -m 755 "$ROOT_DIR/bin/curtain-sentry" "$HOME/.local/libexec/curtain-sentry"
-  sentry_plist="$HOME/Library/LaunchAgents/me.longbiaochen.curtain-sentry.plist"
-  sed "s|__HOME__|$HOME|g" "$ROOT_DIR/examples/me.longbiaochen.curtain-sentry.plist" > "$sentry_plist"
-  launchctl bootout "gui/$(id -u)/me.longbiaochen.curtain-sentry" >/dev/null 2>&1 || true
+  sentry_plist="$HOME/Library/LaunchAgents/$SENTRY_LABEL.plist"
+  render_sentry_plist "$sentry_plist"
+  launchctl bootout "gui/$(id -u)/$SENTRY_LABEL" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/$(id -u)" "$sentry_plist"
   echo "installed curtain-sentry (launchd, every 5 min)"
 
@@ -210,7 +242,7 @@ case "$MODE" in
     ;;
   --telemetry|telemetry)
     launch_and_wait "$APP_BUNDLE"
-    /usr/bin/log stream --info --style compact --predicate 'subsystem == "com.longbiaochen.AgentCurtain" OR process == "AgentCurtain"'
+    /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\" OR process == \"AgentCurtain\""
     ;;
   --verify|verify)
     swift test --scratch-path "$SWIFTPM_SCRATCH_PATH"

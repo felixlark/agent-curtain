@@ -50,26 +50,28 @@ UUID 识别设备，即使系统重新分配了临时 Display ID 也能对应；
 - Apple Silicon、macOS 26 或以上；
 - Xcode Command Line Tools；
 - 已安装带 `betterdisplaycli` 的 BetterDisplay；Pro 为可选回退；
-- 从源码构建时，钥匙串内有 PRD 指定的 Developer ID 身份。
+- 本机已有满足 Developer ID 要求的 Apple 签名证书；调用时显式提供其 SHA-1 或完整显示名。
 
 ```bash
-git clone https://github.com/longbiaochen/agent-curtain.git
+git clone https://github.com/felixlark/agent-curtain.git
 cd agent-curtain
+export CURTAIN_SIGNING_IDENTITY="<available-Apple-signing-certificate-SHA1>"
 ./install.sh
+# 只生成候选，不启动或安装：
+./script/build_and_run.sh --build-only
 ```
 
-主程序、包内恢复看门狗、外层 app 都使用以下身份签名：
-
-```text
-Developer ID Application: LONGBIAO CHEN (HJG65XBC25)
-```
+主程序、包内恢复看门狗和外层 app 使用显式提供的
+`CURTAIN_SIGNING_IDENTITY` 选择器签名；不再内置个人证书默认值。
+可填写证书 SHA-1（匹配时不区分大小写）或完整显示名；不可用时直接失败。
 
 构建强制启用 Hardened Runtime 和安全时间戳；找不到身份时直接失败，不回退到
 ad-hoc 签名。安装后还会对 `/Applications` 中的 app 再做一次严格验证。
 
 第一次启用前，到“系统设置 → 隐私与安全性 → 辅助功能”勾选 **AgentCurtain**。
-它的 designated requirement 基于 bundle identifier、Apple anchor 和 Team ID，
-不含 `cdhash`，因此后续用同一身份重编译、升级不需要重新授权。
+授权延续要求 bundle identifier 和 Apple 证书要求保持一致，且不含 `cdhash`。
+公开中性 Bundle/sentry 默认值不会自动保留旧安装身份；兼容构建需要显式输入
+原有标识。参数保持检查不代表 TCC 或实际升级已验收。
 
 ## 使用
 
