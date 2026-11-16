@@ -252,7 +252,7 @@ codesign --force --options runtime --timestamp \
 codesign -d -r- AgentCurtain.app
 # 期望形如:
 # designated => identifier "..." and anchor apple generic
-#   and certificate leaf[subject.OU] = HJG65XBC25
+#   and certificate leaf[subject.OU] = <team-id>
 ```
 
 若输出里出现 `cdhash`,说明签名方式不对,授权仍会在重编译后失效 —— 这是
