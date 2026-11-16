@@ -70,11 +70,11 @@ python3 script/capture_acceptance_snapshot.py --label after-unlock
 
 本轮没有改变安装物，也没有执行解除/重启/强杀或显示拓扑切换，保留今晚
 “先解除”的有效现场。截图与证据位于
-[demo 目录](/Users/longbiao/Documents/Development/office/demo-20261013/agent-curtain/)。
+demo 目录（`~/Documents/Development/office/demo-20261013/agent-curtain/`，私有证据路径）。
 
 ## 运行维护与今晚配合
 
-沿用 [21:00 清单](/Users/longbiao/Documents/Development/office/agent-curtain-实机确认-20261013.md)。
+沿用 21:00 清单（`~/Documents/Development/office/agent-curtain-实机确认-20261013.md`，私有证据路径）。
 现场从当前真实状态开始，不强行假定仍为 drawn；只有实际解除后继续存在的
 pending/错误才进入故障复盘。既有恢复归档完整保留，亮度未知不写成一致。
 

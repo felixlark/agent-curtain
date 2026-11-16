@@ -11,10 +11,10 @@
 - `096828b`：亮度协调只查询实际活动显示器，避免查询已断开外屏库存项。
 - `954df31`：超时测试使用独立 POSIX shell 和明确的超时余量，保留强制超时及恢复断言。
 - 最终安装版 `/Applications/AgentCurtain.app`：**1.1.4 (24)**，生产源码绑定 `096828b`；其后的测试和报告提交不改变安装版生产源码。
-- Developer ID：`Developer ID Application: LONGBIAO CHEN (HJG65XBC25)`；Hardened Runtime、时间戳、稳定 designated requirement 均验证通过。
+- 签名类型：Developer ID Application（证书主体与团队标识保留在私有回执）；Hardened Runtime、时间戳、稳定 designated requirement 均验证通过。
 - 安装版与签名候选主程序 SHA-256 均为 `946ed3f02309828f94b62926de6d63d7ce73ec73c35328c631f1b81a4da97bba`。
 - 更新了已有的 `~/.local/bin/curtain` 和 `/usr/local/bin/curtain`。安装使用现有非交互授权，没有密码提示，没有改变 TCC。
-- 旧安装版、CLI 和起始状态备份：[本任务备份](</Users/longbiao/Library/Application Support/agent-curtain/backups/2026-10-14-marker-0346cffe>)。
+- 旧安装版、CLI 和起始状态备份：本任务备份（`~/Library/Application Support/agent-curtain/backups/2026-10-14-marker-0346cffe`，私有证据路径）。
 - 保留基线中的全部无关未跟踪文件；没有新建或清理 worktree。
 
 ## 地基原型先行
@@ -22,7 +22,7 @@
 在任何正式代码变更之前，单次 Swift 原型在这台 Mac 上建立 `.cghidEventTap`，发送带 `.eventSourceUserData` 的事件，并在 tap 中逐个核对整数值。鼠标移动（5）、左键按下（1）/抬起（2）、键盘按下（10）/抬起（11）均原样读回，结论为 **PASS all 5 event types**。
 
 原型 tap 消费自己的测试事件，避免桌面副作用；已有 `listenAccess`、`postAccess`、`AXTrusted` 均为 true，无权限写入。
-源码与原始回执：[prototype.swift](/Users/longbiao/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/prototype.swift)、[prototype-full.log](/Users/longbiao/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/prototype-full.log)。
+源码与原始回执：prototype.swift（`~/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/prototype.swift`，私有证据路径）、prototype-full.log（`~/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/prototype-full.log`，私有证据路径）。
 
 ## 外部 agent 注入方式
 
@@ -33,7 +33,7 @@ curtain on 30 --allow-marker >/dev/null
 
 已 drawn 时重复 `on` 保留当前会话；切换档位需先 `off`。`on --allow-marker 30` 同样支持。
 
-暗号文件：`~/.local/state/curtain/injection-marker`，即 `/Users/longbiao/.local/state/curtain/injection-marker`，权限 **0600**，私有父目录 **0700**。文件内容是有符号 64 位十进制整数，不能用 JavaScript Number 读回。控制响应同时返回 `injectionMarker`；报告和实测日志均不保存当前暗号值。
+暗号文件：`~/.local/state/curtain/injection-marker`，即 `~/.local/state/curtain/injection-marker`，权限 **0600**，私有父目录 **0700**。文件内容是有符号 64 位十进制整数，不能用 JavaScript Number 读回。控制响应同时返回 `injectionMarker`；报告和实测日志均不保存当前暗号值。
 
 ```swift
 let url = FileManager.default.homeDirectoryForCurrentUser
@@ -58,7 +58,7 @@ event.post(tap: .cghidEventTap)
 - banner 生命周期与完整标签布局、窗口恢复、watchdog 故障恢复、sentry 回归均通过；watchdog 的 kill-9 仅用于测试自己的虚拟 owner 进程。
 - 最终 `curtain doctor` **exit 0**。
 
-完整日志：[证据目录](/Users/longbiao/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe)。首次全套运行中的既有 100ms 超时 fixture 在负载下波动，定向运行通过；将测试 shell 与宿主启动配置隔离、首轮 sleep 改为 2 秒且命令 deadline 为 0.5 秒后，全套通过，没有删除断言或禁用用例。
+完整日志：证据目录（`~/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe`，私有证据路径）。首次全套运行中的既有 100ms 超时 fixture 在负载下波动，定向运行通过；将测试 shell 与宿主启动配置隔离、首轮 sleep 改为 2 秒且命令 deadline 为 0.5 秒后，全套通过，没有删除断言或禁用用例。
 
 ## 最终安装版真机验收
 
@@ -74,11 +74,11 @@ event.post(tap: .cghidEventTap)
 
 热键验收由授权的事件注入测试程序向 HID 流生成该组合，实际触发安装版解锁；没有声称由用户手按键盘。保护状态下成功绑定正式安装版横幅，官方 CUA AX 读回 `屏幕关闭·仅放行注入 ⌃⌥⌘U 解除`；原始图像显示左右红色翼区完整文案，普通档另读回 `屏幕关闭·输入锁定`。菜单/横幅文案与不截断布局另有转场和布局测试。open 状态没有横幅窗口时，菜单栏 App 的 CUA 绑定 timeout 不作为产品失败或验收通过证据。
 
-官方 Computer Use 原始图片在本执行回执中；摘录：[cua-observations.txt](/Users/longbiao/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/cua-observations.txt)。实际保存并关闭的文稿：[AgentCurtain-marker-test.rtf](/Users/longbiao/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/AgentCurtain-marker-test.rtf)。对应 `accepted-*.json` 保留逐步状态与计数，暗号字段均脱敏。
+官方 Computer Use 原始图片在本执行回执中；摘录：cua-observations.txt（`~/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/cua-observations.txt`，私有证据路径）。实际保存并关闭的文稿：AgentCurtain-marker-test.rtf（`~/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/AgentCurtain-marker-test.rtf`，私有证据路径）。对应 `accepted-*.json` 保留逐步状态与计数，暗号字段均脱敏。
 
 ## 实测中修复的恢复故障
 
-1. 第一次解除触发 `EXC_BREAKPOINT / SIGTRAP`，崩溃栈定位 `DisplaySession.swift:306` 的重复字典键 `UNKNOWN`。看门狗重启应用并恢复现场。布局恢复改为等待已保存的真实 UUID，并对重复真实身份报可恢复错误；随后真机热键解除完成，未再发生该崩溃。证据：[crash-excerpt.json](/Users/longbiao/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/crash-excerpt.json)。
+1. 第一次解除触发 `EXC_BREAKPOINT / SIGTRAP`，崩溃栈定位 `DisplaySession.swift:306` 的重复字典键 `UNKNOWN`。看门狗重启应用并恢复现场。布局恢复改为等待已保存的真实 UUID，并对重复真实身份报可恢复错误；随后真机热键解除完成，未再发生该崩溃。证据：crash-excerpt.json（`~/Library/Logs/agent-curtain/2026-10-14-marker-0346cffe/crash-excerpt.json`，私有证据路径）。
 2. 普通 drawn 后出现 `display reconciliation failed: betterdisplaycli failed: Failed.`。亮度协调错误地查询 BetterDisplay 中已断开外屏的库存项；改为只查询 CG 实际活动屏。最终普通 drawn 的持续状态与 doctor 均正常。
 
 这两项为完成本票解锁和“测完恢复原状”所需修复，未改看护链、白名单或拒绝名单。

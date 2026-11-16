@@ -185,11 +185,11 @@ ssh → launchctl submit   ARMED ✅
 后台子进程。安装版核验发现阻断器存活时提示条 PID 已失效，且状态无法证明看门狗
 独立于 SSH shell。
 
-修复后拆成三个精确 job label：
+当时修复采用以下三个 job；公开文稿以 `<app-namespace>` 代替私有命名空间，实际标识保留在受控原件：
 
-- `me.longbiaochen.curtain-blocker`：TCC 责任进程稳定的 HID 阻断器；
-- `me.longbiaochen.curtain-banner`：GUI session 内持久的远程提示条；
-- `me.longbiaochen.curtain-watchdog`：监控精确 blocker PID，退出后原子认领亮度备份并恢复。
+- `<app-namespace>.curtain-blocker`：TCC 责任进程稳定的 HID 阻断器；
+- `<app-namespace>.curtain-banner`：GUI session 内持久的远程提示条；
+- `<app-namespace>.curtain-watchdog`：监控精确 blocker PID，退出后原子认领亮度备份并恢复。
 
 `curtain on` 只有在四屏调暗读回、阻断器和看门狗都成功后才报告生效；调光失败、
 阻断器失败或看门狗失败会回滚。`curtain off` 不依赖 TCC，并保留旧版本状态的恢复
