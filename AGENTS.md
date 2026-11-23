@@ -3,7 +3,7 @@
 ## 项目身份与职责
 
 - **规范仓库**：`felixlark/agent-curtain`；归属工程部。本项目负责macOS AgentCurtain 菜单栏程序、受控 GUI 会话与安装验收。
-- **经理**负责项目目标、任务分解、依赖、优先级、发布及交付闭环；**专员**按唯一主 Issue 实施成果、相称验证和证据回写。
+- **主任**负责项目目标、任务分解、依赖、优先级、发布及交付闭环；**专员**按唯一主 Issue 实施成果、相称验证和证据回写。
 - **ChatGPT 办公室**（秘书长 Bot／秘书）承接用户战略议事、重大取舍和跨组织正式决定。项目内部已授权事项使用 A2A，跨部门及跨项目公文使用目标 GitHub Issue／PR。
 - 共用制度：[Cabinet/GOVERNANCE.md](https://github.com/smart-shadow/Cabinet/blob/main/GOVERNANCE.md)；规范登记：[团队项目登记册](https://github.com/smart-shadow/Cabinet/blob/main/organization/team-project-registry.md)；跨端采用：[同步规范](https://github.com/smart-shadow/Cabinet/blob/main/organization/source-sync.md)。
 
